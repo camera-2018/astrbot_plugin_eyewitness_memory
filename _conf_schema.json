@@ -1,0 +1,3 @@
+{
+  "qdrant_api_key": {"description": "Qdrant API Key（可选）", "type": "string", "default": "", "hint": "仅后端使用，不返回给页面。其余配置在 AstrBot 的群聊记忆插件页面管理。"}
+}

@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+node_modules/
+.DS_Store
+.env*
+*.db*
+*.sqlite*
+*.token
+.runtime/
+data/
+frontend/test-results/
+frontend/playwright-report/

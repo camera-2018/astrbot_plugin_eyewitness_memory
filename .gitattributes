@@ -1,0 +1,2 @@
+# Keep bundled dependency output byte-for-byte reproducible with Vite.
+pages/console/assets/* linguist-generated=true -whitespace
