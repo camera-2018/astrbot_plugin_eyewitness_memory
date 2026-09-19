@@ -88,11 +88,16 @@ async def run(port: int):
             return '{"candidates":[]}'
 
         engine = Engine(store, generate)
+
+        async def providers():
+            return {"chat": ["demo-only", "demo-other"], "embedding": ["demo-embedding"]}
+
         app = create_app(
             store,
             engine,
             "demo-local-only-token-do-not-use-in-production",
             Path(__file__).resolve().parents[1] / "pages" / "console",
+            providers=providers,
         )
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()

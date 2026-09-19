@@ -28,7 +28,9 @@ class EyewitnessMemoryPlugin(Star):
         self.data_dir.chmod(0o700)  # Protect SQLite and its WAL/SHM files.
         self.store = Store(self.data_dir / "memory.sqlite3")
         self.engine = Engine(
-            self.store, self.generate, VectorIndex(self.embed, config.get("qdrant_api_key", ""))
+            self.store,
+            self.generate,
+            VectorIndex(self.embed, lambda: self.config.get("qdrant_api_key", "")),
         )
         self.admin = AdminAPI(self.store, self.engine, self.providers)
         self.ready = False
@@ -40,6 +42,17 @@ class EyewitnessMemoryPlugin(Star):
     async def initialize(self):
         try:
             await self.store.call("open")
+            await self.store.call("bind_config", self.config)
+            # AstrBot versions without a dedicated embedding picker render these
+            # options with their built-in select control instead of a free-text ID.
+            schema = getattr(self.config, "schema", None)
+            if schema and "embedding_provider_id" in schema:
+                providers = await self.providers()
+                schema["embedding_provider_id"]["options"] = list(
+                    dict.fromkeys(
+                        ["", *providers["embedding"], self.config.get("embedding_provider_id", "")]
+                    )
+                )
             await self.engine.start()
             self.ready = True
             logger.info("群聊记忆已启动；管理页面复用 AstrBot 登录。")

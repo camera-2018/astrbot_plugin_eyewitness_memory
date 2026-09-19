@@ -67,6 +67,7 @@ export type Overview = {
   version: string;
 };
 export type Settings = {
+  revision?: string;
   mode: "off" | "active";
   allowed_scopes: string[];
   bot_ids: string[];

@@ -47,14 +47,21 @@ class AdminAPI:
                 "last_error": engine.last_error,
                 "last_cycle": engine.last_cycle,
                 "scopes": await store.call("list_scopes"),
-                "version": "0.1.4",
+                "version": "0.1.5",
             }
         if route == "providers" and method == "GET":
             return await self.providers() if self.providers else {"chat": [], "embedding": []}
         if route == "settings" and method in ("GET", "PUT"):
             if method == "PUT":
-                await store.call("save_settings", Settings.model_validate(body))
-            return (await store.call("get_settings")).model_dump()
+                values = dict(body)
+                key = values.pop("qdrant_api_key", None)
+                revision = values.pop("revision", None)
+                if key is not None and not isinstance(key, str):
+                    raise ValueError("Invalid key")
+                if revision is not None and not isinstance(revision, str):
+                    raise ValueError("Invalid revision")
+                await store.call("save_settings", Settings.model_validate(values), key, revision)
+            return await store.call("settings_document")
         if route == "memories" and method == "GET":
             return await store.call(
                 "list_memories",

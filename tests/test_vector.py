@@ -63,3 +63,28 @@ async def test_qdrant_filter_payload_and_namespace(aiohttp_server):
         assert new != old
     finally:
         await index.close()
+
+
+async def test_updated_native_key_is_used_without_reloading_index(aiohttp_server):
+    keys = []
+
+    async def handler(request):
+        keys.append(request.headers.get("api-key"))
+        return web.json_response({"result": {}})
+
+    app = web.Application()
+    app.router.add_get("/collections", handler)
+    server = await aiohttp_server(app)
+    cfg = Settings(qdrant_url=str(server.make_url("/")).rstrip("/"))
+    config = {"key": "synthetic-one"}
+    index = VectorIndex(None, lambda: config["key"])
+    await index.start()
+    try:
+        await index.request(cfg, "GET", "/collections")
+        config["key"] = "synthetic-two"
+        await index.request(cfg, "GET", "/collections")
+        config["key"] = ""
+        await index.request(cfg, "GET", "/collections")
+        assert keys == ["synthetic-one", "synthetic-two", None]
+    finally:
+        await index.close()

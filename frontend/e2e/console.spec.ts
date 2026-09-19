@@ -51,6 +51,11 @@ test("AstrBot bridge, source inspection, edit, preview and settings without toke
     page.getByText("小林之前说的绘画比赛计划是什么", { exact: true }),
   ).toBeVisible();
   await page.getByRole("button", { name: "设置",exact:true }).click();
+  const model = page.getByLabel("辅助模型 Provider ID", { exact: true });
+  await expect(page.getByLabel("Qdrant API Key（可选）", { exact: true })).toHaveValue("");
+  await expect(model).toHaveJSProperty("tagName", "SELECT");
+  await expect(model.locator('option[value="demo-other"]')).toHaveCount(1);
+  await model.selectOption("demo-other");
   const toggle = page.getByLabel("插件开关", { exact: true });
   await expect(toggle.locator("option")).toHaveCount(2);
   await expect(toggle.locator('option[value="shadow"]')).toHaveCount(0);
@@ -61,11 +66,35 @@ test("AstrBot bridge, source inspection, edit, preview and settings without toke
   await page.reload();
   await expect(page.locator("header").getByText("已停用", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "设置", exact: true }).click();
+  await expect(model).toHaveValue("demo-other");
+  await model.selectOption("demo-only");
   await expect(toggle).toHaveValue("off");
   await toggle.selectOption("active");
   await page.getByRole("button", { name: "保存设置" }).click();
   await expect(page.getByRole("status")).toHaveText("设置已保存");
   expect(errors).toEqual([]);
+});
+
+test("stale settings do not overwrite another editor", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  const budget = page.getByLabel("每日辅助模型调用上限（UTC）", { exact: true });
+  await expect(budget).toBeVisible();
+  await budget.fill("250");
+  const original = await page.evaluate(async () => {
+    const bridge = window.AstrBotPluginPage!;
+    const cfg = await bridge.apiPost("api", { path: "settings" }) as Record<string, unknown>;
+    await bridge.apiPost("api", { path: "settings", method: "PUT", body: { ...cfg, daily_calls: 300 } });
+    return cfg.daily_calls;
+  });
+  await page.getByRole("button", { name: "保存设置", exact: true }).click();
+  await expect(page.getByText("请求无效或数据版本冲突，请检查并刷新", { exact: true })).toBeVisible();
+  page.once("dialog", d => d.accept());
+  await page.getByRole("button", { name: "重新读取配置", exact: true }).click();
+  await expect(budget).toHaveValue("300");
+  await budget.fill(String(original));
+  await page.getByRole("button", { name: "保存设置", exact: true }).click();
+  await expect(page.getByRole("status")).toHaveText("设置已保存");
 });
 
 test("mobile navigation and screenshot", async ({ page }) => {

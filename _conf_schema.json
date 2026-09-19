@@ -1,3 +1,20 @@
 {
-  "qdrant_api_key": {"description": "Qdrant API Key（可选）", "type": "string", "default": "", "hint": "仅后端使用，不返回给页面。其余配置在 AstrBot 的群聊记忆插件页面管理。"}
+  "mode": {"description": "插件开关", "type": "string", "default": "off", "options": ["off", "active"], "labels": ["关闭", "启用"], "hint": "关闭后停止采集、提取和召回；启用后仅记录白名单群。"},
+  "allowed_scopes": {"description": "允许记录的群", "type": "list", "default": [], "hint": "填写完整会话标识，例如 default:GroupMessage:123456，不是单独群号。"},
+  "bot_ids": {"description": "其他机器人 ID", "type": "list", "default": [], "hint": "不采集这些账号的消息。"},
+  "provider_id": {"description": "辅助模型", "type": "string", "default": "", "_special": "select_provider", "hint": "用于提取、相关性判断和原文核验，需要支持 JSON 输出。"},
+  "embedding_provider_id": {"description": "Embedding 模型（可选）", "type": "string", "default": "", "_special": "select_provider_embedding", "options": [""], "hint": "候选来自 AstrBot 已配置的向量模型。留空仅使用关键词检索；新增提供方后重载本插件刷新候选。"},
+  "qdrant_url": {"description": "Qdrant URL", "type": "string", "default": "", "hint": "留空仅关键词检索，例如 http://qdrant:6333。"},
+  "qdrant_api_key": {"description": "Qdrant API Key（可选）", "type": "string", "default": "", "secret": true, "hint": "密钥保存在 AstrBot 插件配置中；插件管理页面只允许修改，不返回已有密钥。"},
+  "collection": {"description": "独立 Collection 前缀", "type": "string", "default": "eyewitness_memory_v1", "hint": "必须以 eyewitness_memory_ 开头，不要复用其他插件索引。"},
+  "online_timeout": {"description": "单次在线时间预算（秒）", "type": "float", "default": 3.0, "slider": {"min": 0.5, "max": 30, "step": 0.5}},
+  "extraction_timeout": {"description": "后台提取超时（秒）", "type": "float", "default": 60.0, "slider": {"min": 5, "max": 180, "step": 1}},
+  "daily_calls": {"description": "每日辅助模型调用上限（UTC）", "type": "int", "default": 200, "slider": {"min": 0, "max": 10000, "step": 1}, "hint": "提取和核验共用额度，失败调用也计入；Embedding 另计。"},
+  "batch_size": {"description": "后台每批消息上限", "type": "int", "default": 40, "slider": {"min": 5, "max": 100, "step": 1}},
+  "batch_age_seconds": {"description": "未满批次最长等待（秒）", "type": "int", "default": 900, "slider": {"min": 60, "max": 86400, "step": 1}},
+  "retention_days": {"description": "未引用原文保留（天）", "type": "int", "default": 30, "slider": {"min": 1, "max": 365, "step": 1}},
+  "trace_days": {"description": "召回记录保留（天）", "type": "int", "default": 7, "slider": {"min": 1, "max": 90, "step": 1}},
+  "max_db_mb": {"description": "SQLite＋WAL 采集保护线（MiB）", "type": "int", "default": 512, "slider": {"min": 16, "max": 4096, "step": 1}},
+  "injection_chars": {"description": "注入字符上限", "type": "int", "default": 8000, "slider": {"min": 200, "max": 16000, "step": 1}, "hint": "按字符计算，不等于 tokens。"},
+  "config_version": {"description": "配置迁移版本", "type": "int", "default": 0, "invisible": true}
 }

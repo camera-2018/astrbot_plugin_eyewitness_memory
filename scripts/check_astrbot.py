@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -17,6 +18,7 @@ async def check():
     os.environ["ASTRBOT_ROOT"] = sandbox.name
     from astrbot.api.provider import ProviderRequest
     from astrbot.core.agent.message import Message, dump_messages_with_checkpoints
+    from astrbot.core.config import AstrBotConfig
 
     root = Path(__file__).resolve().parents[1]
     package = types.ModuleType("eyewitness_plugin_check")
@@ -69,9 +71,11 @@ async def check():
             return Path(tmp)
 
         module.StarTools.get_data_dir = data_dir
-        plugin = module.EyewitnessMemoryPlugin(
-            Context(), {"panel_host": "127.0.0.1", "panel_port": 0}
+        config = AstrBotConfig(
+            config_path=str(Path(tmp) / "native-config.json"),
+            schema=json.loads((root / "_conf_schema.json").read_text()),
         )
+        plugin = module.EyewitnessMemoryPlugin(Context(), config)
         await plugin.initialize()
         try:
             assert plugin.ready
@@ -79,6 +83,15 @@ async def check():
             cfg.mode = "active"
             cfg.allowed_scopes = [Event.unified_msg_origin]
             await plugin.store.call("save_settings", cfg)
+            assert config["mode"] == "active" and config["allowed_scopes"] == cfg.allowed_scopes
+            assert (
+                json.loads(Path(config.config_path).read_text(encoding="utf-8-sig"))["mode"]
+                == "active"
+            )
+            config.save_config({"provider_id": "native-selection"})
+            assert (await plugin.store.call("get_settings")).provider_id == "native-selection"
+            assert config.schema["embedding_provider_id"]["options"] == [""]
+            print("PASS: native AstrBot config and plugin settings share values and persistence")
             await plugin.capture(Event())
             captured = (await plugin.store.call("recent", Event.unified_msg_origin))[0]
             assert captured["sent_at"] == Event.message_obj.raw_message["time"]

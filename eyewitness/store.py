@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .config import ConfigSettings, settings_revision
 from .context import bounded_context, context_message, message_order, message_time, platform_time
 from .models import Candidate, Settings, safe_text, terms
 
@@ -20,6 +21,7 @@ class Store:
         self.path = path
         self.lock = asyncio.Lock()
         self.db: sqlite3.Connection | None = None
+        self.config_settings: ConfigSettings | None = None
 
     async def call(self, name: str, *args, **kwargs):
         async with self.lock:
@@ -107,11 +109,36 @@ class Store:
             self.db = None
 
     def get_settings(self) -> Settings:
+        if self.config_settings is not None:
+            return self.config_settings.read()
         row = self.db.execute("SELECT data FROM settings WHERE id=1").fetchone()
         return Settings.model_validate_json(row[0]) if row else Settings()
 
-    def save_settings(self, settings: Settings):
+    def bind_config(self, config):
+        row = self.db.execute("SELECT data FROM settings WHERE id=1").fetchone()
+        previous = Settings.model_validate_json(row[0]) if row else None
+        backend = ConfigSettings(config)
+        current = backend.migrate(previous)
+        self._cache_settings(previous or Settings(), current)
+        self.config_settings = backend
+
+    def settings_document(self):
+        settings = self.get_settings()
+        return {**settings.model_dump(), "revision": settings_revision(settings)}
+
+    def save_settings(
+        self, settings: Settings, qdrant_api_key: str | None = None, revision: str | None = None
+    ):
         old = self.get_settings()
+        if revision is not None and revision != settings_revision(old):
+            raise ValueError("Settings changed; reload before saving")
+        if self.config_settings is not None:
+            self.config_settings.write(settings, qdrant_api_key)
+        elif qdrant_api_key is not None:
+            raise ValueError("Secrets require AstrBot configuration")
+        self._cache_settings(old, settings)
+
+    def _cache_settings(self, old: Settings, settings: Settings):
         with self.db:
             self.db.execute(
                 "INSERT OR REPLACE INTO settings VALUES(1,?)", (settings.model_dump_json(),)

@@ -10,7 +10,7 @@ from .models import Settings
 class VectorIndex:
     """Optional Qdrant REST adapter; authoritative checks always happen in SQLite."""
 
-    def __init__(self, embed, api_key: str = ""):
+    def __init__(self, embed, api_key=""):
         self.embed = embed
         self.api_key = api_key
         self.session: aiohttp.ClientSession | None = None
@@ -27,7 +27,8 @@ class VectorIndex:
         return bool(cfg.qdrant_url and cfg.embedding_provider_id)
 
     async def request(self, cfg: Settings, method: str, path: str, body=None):
-        headers = {"api-key": self.api_key} if self.api_key else {}
+        key = self.api_key() if callable(self.api_key) else self.api_key
+        headers = {"api-key": key} if key else {}
         async with self.session.request(
             method, cfg.qdrant_url + path, json=body, headers=headers
         ) as r:

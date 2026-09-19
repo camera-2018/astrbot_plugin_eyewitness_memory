@@ -644,6 +644,8 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
   }>({ chat: [], embedding: [] });
   const [eraseScope, setEraseScope] = useState(""),
     [eraseSubject, setEraseSubject] = useState("");
+  const [keyChange, setKeyChange] = useState<string | null>(null);
+  const [dirty, setDirty] = useState(false);
   useEffect(() => {
     api<Settings>("settings")
       .then(setCfg)
@@ -652,9 +654,23 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
       .then(setProviders)
       .catch(() => {});
   }, []);
+  useEffect(() => {
+    const reload = () => {
+      if (!dirty && document.visibilityState === "visible") {
+        api<Settings>("settings").then(setCfg).catch((e) => setError(e.message));
+      }
+    };
+    window.addEventListener("focus", reload);
+    document.addEventListener("visibilitychange", reload);
+    return () => {
+      window.removeEventListener("focus", reload);
+      document.removeEventListener("visibilitychange", reload);
+    };
+  }, [dirty]);
   function patch<K extends keyof Settings>(k: K, v: Settings[K]) {
     setCfg((c) => (c ? { ...c, [k]: v } : c));
     setSaved(false);
+    setDirty(true);
   }
   async function save(e: FormEvent) {
     e.preventDefault();
@@ -665,6 +681,7 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
       ...cfg,
       allowed_scopes: cfg.allowed_scopes.map((s) => s.trim()).filter(Boolean),
       bot_ids: cfg.bot_ids.map((s) => s.trim()).filter(Boolean),
+      ...(keyChange !== null ? { qdrant_api_key: keyChange } : {}),
     };
     try {
       setCfg(
@@ -674,6 +691,8 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
         }),
       );
       setSaved(true);
+      setDirty(false);
+      setKeyChange(null);
       await refresh();
     } catch (e) {
       setError((e as Error).message);
@@ -741,7 +760,8 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
         <section className="memory-card space-y-5">
           <h2 className="font-medium">运行与作用域</h2>
           <div className="notice">
-            启用后自动提取记忆，通过相关性检查和原文核验后用于回复。会产生辅助模型费用；白名单为空时不采集任何群。
+            这里与 AstrBot「插件配置」使用同一份设置。任一处保存后都会生效；在其他页面修改后，可重新读取最新配置。
+            启用后会产生辅助模型费用，白名单为空时不采集任何群。
           </div>
           <Field title="插件开关">
             <select
@@ -777,28 +797,34 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
           <h2 className="font-medium">模型与索引</h2>
           <div className="grid sm:grid-cols-2 gap-5">
             <Field title="辅助模型 Provider ID">
-              <Input
-                list="chat-providers"
+              <select
+                aria-label="辅助模型 Provider ID"
                 value={cfg.provider_id}
                 onChange={(e) => patch("provider_id", e.target.value)}
-              />
-              <datalist id="chat-providers">
+              >
+                <option value="">请选择辅助模型</option>
+                {cfg.provider_id && !providers.chat.includes(cfg.provider_id) && (
+                  <option value={cfg.provider_id}>{cfg.provider_id}（当前不可用）</option>
+                )}
                 {providers.chat.map((p) => (
-                  <option key={p} value={p} />
+                  <option key={p} value={p}>{p}</option>
                 ))}
-              </datalist>
+              </select>
             </Field>
             <Field title="Embedding Provider ID（可选）">
-              <Input
-                list="embedding-providers"
+              <select
+                aria-label="Embedding Provider ID（可选）"
                 value={cfg.embedding_provider_id}
                 onChange={(e) => patch("embedding_provider_id", e.target.value)}
-              />
-              <datalist id="embedding-providers">
+              >
+                <option value="">不使用向量模型</option>
+                {cfg.embedding_provider_id && !providers.embedding.includes(cfg.embedding_provider_id) && (
+                  <option value={cfg.embedding_provider_id}>{cfg.embedding_provider_id}（当前不可用）</option>
+                )}
                 {providers.embedding.map((p) => (
-                  <option key={p} value={p} />
+                  <option key={p} value={p}>{p}</option>
                 ))}
-              </datalist>
+              </select>
             </Field>
             <Field title="Qdrant URL（留空仅关键词检索）">
               <Input
@@ -813,14 +839,34 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
                 onChange={(e) => patch("collection", e.target.value)}
               />
             </Field>
+            <Field title="Qdrant API Key（可选）">
+              <Input
+                aria-label="Qdrant API Key（可选）"
+                type="password"
+                autoComplete="new-password"
+                placeholder="留空保留原密钥，不显示已有密钥"
+                value={keyChange || ""}
+                onChange={(e) => {
+                  setKeyChange(e.target.value || null);
+                  setDirty(true);
+                  setSaved(false);
+                }}
+              />
+              <Button type="button" variant="outline" onClick={() => {
+                if (confirm("保存时清空 Qdrant API Key？")) {
+                  setKeyChange(""); setDirty(true); setSaved(false);
+                }
+              }}>清空密钥</Button>
+              {keyChange === "" && <p className="subtle">保存后将清空密钥。</p>}
+            </Field>
           </div>
           <p className="subtle">
             记忆片段只追加到本轮用户消息并随会话历史保存，不写 system prompt。
             删除插件记忆不会回改已保存的聊天记录；需要彻底清除时还需删除相应 AstrBot 会话。
           </p>
           <p className="subtle">
-            凭据继续由 AstrBot
-            管理，不在这里填写或显示。向量模型变更使用独立索引代际。
+            模型凭据由 AstrBot 管理。这里只选择已配置的模型，不填写模型 API Key。
+            向量模型变更使用独立索引代际。
           </p>
           <Button
             type="button"
@@ -872,6 +918,13 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
           <Button disabled={busy}>
             {busy ? <Loader2 className="animate-spin" /> : <Check />}保存设置
           </Button>
+          <Button type="button" variant="outline" disabled={busy} onClick={async () => {
+            if (dirty && !confirm("放弃未保存的修改，读取最新配置？")) return;
+            try {
+              setCfg(await api<Settings>("settings"));
+              setKeyChange(null); setDirty(false); setSaved(false); setError("");
+            } catch (e) { setError((e as Error).message); }
+          }}>重新读取配置</Button>
           {saved && (
             <span role="status" className="text-sm text-primary">
               设置已保存
