@@ -4,15 +4,15 @@ import time
 
 import pytest
 
-from evidence.context import (
+from eyewitness.context import (
     CONTEXT_CHARS,
     history_markers,
     memory_marker,
     platform_time,
     render_memory,
 )
-from evidence.models import Candidate, Settings
-from evidence.store import Store
+from eyewitness.models import Candidate, Settings
+from eyewitness.store import Store
 from tests.conftest import OTHER, SCOPE, seed
 
 

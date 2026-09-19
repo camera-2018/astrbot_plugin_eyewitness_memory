@@ -33,7 +33,7 @@ class Engine:
     async def start(self):
         if self.vector:
             await self.vector.start()
-        self.worker_task = asyncio.create_task(self.worker(), name="evidence-memory-worker")
+        self.worker_task = asyncio.create_task(self.worker(), name="eyewitness-memory-worker")
 
     async def close(self):
         if self.worker_task:
@@ -133,7 +133,7 @@ class Engine:
                 self.last_cycle = time.time()
             except Exception as exc:
                 self.last_error = "后台任务异常：" + type(exc).__name__
-                log.warning("Evidence memory worker: %s", type(exc).__name__)
+                log.warning("Eyewitness Memory worker: %s", type(exc).__name__)
             await asyncio.sleep(30)
 
     async def recall(

@@ -9,14 +9,14 @@ from pathlib import Path
 
 from aiohttp import web
 
-from evidence.engine import Engine
-from evidence.models import Candidate, Settings
-from evidence.panel import create_app
-from evidence.store import Store
+from eyewitness.engine import Engine
+from eyewitness.models import Candidate, Settings
+from eyewitness.panel import create_app
+from eyewitness.store import Store
 
 
 async def run(port: int):
-    with tempfile.TemporaryDirectory(prefix="evidence-memory-demo-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="eyewitness-memory-demo-") as tmp:
         store = Store(Path(tmp) / "demo.sqlite3")
         await store.call("open")
         scope = "demo:GroupMessage:10001"

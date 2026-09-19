@@ -1,10 +1,10 @@
 # Eyewitness Memory · 群聊记忆
 
-仓库名：`astrbot_plugin_eyewitness_memory`。目前为兼容已有安装，AstrBot 内部插件标识仍为 `astrbot_plugin_evidence_memory`，管理页面与数据目录沿用该标识；仓库改名不会迁移或清空记忆。
+仓库名、AstrBot 插件标识、安装目录、数据目录和管理页面统一使用 `astrbot_plugin_eyewitness_memory`。
 
 自动提取群聊记忆、按群检索并核对原文的 AstrBot 插件。管理页面使用 React + TypeScript + shadcn/ui，参考 Repeat 插件的深色管理界面，直接复用 AstrBot 登录。
 
-> v0.1.3。仅保留启用／停用开关。新安装默认停用、群白名单为空；启用后，将核验结果和带时间、发言者的局部原文追加到本轮用户消息。当前支持 QQ / aiocqhttp。
+> v0.1.4。仅保留启用／停用开关。新安装默认停用、群白名单为空；启用后，将核验结果和带时间、发言者的局部原文追加到本轮用户消息。当前支持 QQ / aiocqhttp。
 
 ## 能做什么
 
@@ -36,16 +36,18 @@ SQLite 是权威存储；Qdrant 不存原文和摘要，只存向量、作用域
 ## 安装前准备
 
 1. AstrBot **4.28.1+、Python 3.11+**；辅助 Chat Provider 已配置。
-2. 仓库地址：[camera-2018/astrbot_plugin_eyewitness_memory](https://github.com/camera-2018/astrbot_plugin_eyewitness_memory)。手动安装时，在 AstrBot 根目录运行 `git clone https://github.com/camera-2018/astrbot_plugin_eyewitness_memory.git data/plugins/astrbot_plugin_evidence_memory`，沿用内部插件目录名；已有安装不要再克隆第二份。
+2. 仓库地址：[camera-2018/astrbot_plugin_eyewitness_memory](https://github.com/camera-2018/astrbot_plugin_eyewitness_memory)。手动安装时，在 AstrBot 根目录运行 `git clone https://github.com/camera-2018/astrbot_plugin_eyewitness_memory.git data/plugins/astrbot_plugin_eyewitness_memory`；已有安装不要再克隆第二份。
 3. 仓库包含 `pages/console/` 构建产物，安装到机器人时不需要 Node.js。修改前端后重新构建并提交产物。
 4. 依赖由 AstrBot 根据 `requirements.txt` 安装。
 5. 在 AstrBot 中打开本插件的管理页面。
 
 ### 管理页面与旧版迁移
 
-从 AstrBot 的插件页面进入，或访问 `/#/plugin-page/astrbot_plugin_evidence_memory/console`。权限由 AstrBot 管理，不是匿名公开管理 API。
+从 AstrBot 的插件页面进入，或访问 `/#/plugin-page/astrbot_plugin_eyewitness_memory/console`。权限由 AstrBot 管理，不是匿名公开管理 API。
 
-旧版 SQLite 和策略自动沿用，插件标识及数据目录不变。`panel_host`、`panel_port`、`panel_public_url` 和旧 `panel.token` 不再使用。已有 Docker 端口映射可在下次维护时移除，不必为页面更新重建容器。
+v0.1.4 统一了内部标识。**旧名称安装不能直接覆盖升级或并行启动两份**；先停止旧插件并备份，再迁移数据目录、配置文件和 Qdrant 索引，最后加载新名称插件。详见 [迁移说明](docs/MIGRATION.md)。记忆 ID、原文和已有会话中的记忆标记不变。
+
+`panel_host`、`panel_port`、`panel_public_url` 和旧 `panel.token` 不再使用。已有 Docker 端口映射可在下次维护时移除，不必为页面更新重建容器。
 
 v0.1.2 移除了影子模式；旧配置中的 `shadow` 自动迁移为停用，避免升级意外开启注入。原来已启用或停用的配置不变，历史试运行记录保留。
 
@@ -66,7 +68,7 @@ v0.1.3 自动升级 SQLite 为 schema 2，保留已有消息与记忆。原代�
 3. 白名单填完整作用域，例如 `default:GroupMessage:123456`，一行一个。不是群名，也不是单独群号。
 4. 填写其他机器人的用户 ID，避免把机器人输出提取成人物事实。
 5. 从一个群开始，确认模型、费用预算与群范围后将「插件开关」设为启用。
-6. 可选配置 Embedding Provider 与 Qdrant URL。Collection 前缀必须以 `evidence_memory_` 开头；不能使用其他插件的 collection。
+6. 可选配置 Embedding Provider 与 Qdrant URL。Collection 前缀必须以 `eyewitness_memory_` 开头；不能使用其他插件的 collection。
 7. 在「召回记录」和「召回测试」中检查来源与核验结果；需要时可停用插件。
 
 记忆策略保存在插件自己的 SQLite；AstrBot 插件配置仅保存可选 Qdrant Key。模型凭据仍由 AstrBot 管理。
@@ -124,7 +126,7 @@ PYTHONPATH=. python scripts/check_astrbot.py
 
 ```text
 main.py                 AstrBot 适配和生命周期
-evidence/               记忆引擎、SQLite、Qdrant、管理 API
+eyewitness/             记忆引擎、SQLite、Qdrant、管理 API
 frontend/               React + shadcn 源码、锁文件、浏览器测试
 pages/console/          已构建的 AstrBot 插件管理页面
 tests/                  隔离后端测试

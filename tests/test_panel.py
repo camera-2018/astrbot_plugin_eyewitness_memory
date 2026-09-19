@@ -1,5 +1,5 @@
-from evidence.engine import Engine
-from evidence.panel import create_app, load_token
+from eyewitness.engine import Engine
+from eyewitness.panel import create_app, load_token
 from tests.conftest import SCOPE, seed
 
 TOKEN = "x" * 48

@@ -14,7 +14,7 @@ class Settings(BaseModel):
     provider_id: str = ""
     embedding_provider_id: str = ""
     qdrant_url: str = ""
-    collection: str = "evidence_memory_v1"
+    collection: str = "eyewitness_memory_v1"
     online_timeout: float = Field(default=3.0, ge=0.5, le=30)
     extraction_timeout: float = Field(default=60.0, ge=5, le=180)
     batch_size: int = Field(default=40, ge=5, le=100)
@@ -36,8 +36,8 @@ class Settings(BaseModel):
     @field_validator("collection")
     @classmethod
     def owned_collection(cls, value: str) -> str:
-        if not re.fullmatch(r"evidence_memory_[a-zA-Z0-9_-]+", value):
-            raise ValueError("collection 必须以 evidence_memory_ 开头，不能复用其他插件索引")
+        if not re.fullmatch(r"eyewitness_memory_[a-zA-Z0-9_-]+", value):
+            raise ValueError("collection 必须以 eyewitness_memory_ 开头，不能复用其他插件索引")
         return value
 
     @field_validator("qdrant_url")

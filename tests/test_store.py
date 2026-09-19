@@ -6,12 +6,12 @@ import time
 import pytest
 from pydantic import ValidationError
 
-from evidence.models import Candidate, Settings, low_signal
+from eyewitness.models import Candidate, Settings, low_signal
 from tests.conftest import OTHER, SCOPE, seed
 
 
 async def test_defaults_no_capture(tmp_path):
-    from evidence.store import Store
+    from eyewitness.store import Store
 
     s = Store(tmp_path / "empty.db")
     await s.call("open")

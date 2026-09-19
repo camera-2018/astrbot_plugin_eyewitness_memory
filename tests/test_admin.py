@@ -1,7 +1,7 @@
 import pytest
 
-from evidence.admin import AdminAPI
-from evidence.engine import Engine
+from eyewitness.admin import AdminAPI
+from eyewitness.engine import Engine
 from tests.conftest import SCOPE, seed
 
 

@@ -2,7 +2,7 @@ import asyncio
 import json
 import time
 
-from evidence.engine import Engine
+from eyewitness.engine import Engine
 from tests.conftest import OTHER, SCOPE, seed
 
 
@@ -75,7 +75,7 @@ async def test_injection_budget_never_emits_summary_without_required_source(stor
 
 
 async def test_retained_marker_prevents_duplicate_injection(store):
-    from evidence.context import memory_marker
+    from eyewitness.context import memory_marker
 
     mid, _ = await seed(store)
     model = Model([])
@@ -84,7 +84,7 @@ async def test_retained_marker_prevents_duplicate_injection(store):
 
 
 async def test_new_version_can_append_even_if_old_source_is_visible(store):
-    from evidence.context import memory_marker
+    from eyewitness.context import memory_marker
 
     mid, source = await seed(store)
     await store.call("edit", mid, 1, "alice 曾计划绘画比赛，但目前进度未知", "active")

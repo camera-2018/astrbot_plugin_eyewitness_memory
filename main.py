@@ -11,16 +11,16 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.message import TextPart
 from astrbot.core.config import AstrBotConfig
 
-from .evidence.admin import AdminAPI
-from .evidence.context import history_markers, platform_time
-from .evidence.engine import Engine
-from .evidence.store import Store
-from .evidence.vector import VectorIndex
+from .eyewitness.admin import AdminAPI
+from .eyewitness.context import history_markers, platform_time
+from .eyewitness.engine import Engine
+from .eyewitness.store import Store
+from .eyewitness.vector import VectorIndex
 
-PLUGIN = "astrbot_plugin_evidence_memory"
+PLUGIN = "astrbot_plugin_eyewitness_memory"
 
 
-class EvidenceMemoryPlugin(Star):
+class EyewitnessMemoryPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
@@ -114,7 +114,7 @@ class EvidenceMemoryPlugin(Star):
                 else None,
             )
         except Exception as exc:
-            logger.warning("Evidence Memory 采集降级：%s", type(exc).__name__)
+            logger.warning("Eyewitness Memory 采集降级：%s", type(exc).__name__)
 
     @filter.on_llm_request(priority=-100)
     async def recall(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -157,7 +157,7 @@ class EvidenceMemoryPlugin(Star):
             if result["mode"] == "active" and result["injection"]:
                 req.extra_user_content_parts.append(TextPart(text=result["injection"]))
         except Exception as exc:
-            logger.warning("Evidence Memory 召回降级：%s", type(exc).__name__)
+            logger.warning("Eyewitness Memory 召回降级：%s", type(exc).__name__)
 
     async def terminate(self):
         self.ready = False

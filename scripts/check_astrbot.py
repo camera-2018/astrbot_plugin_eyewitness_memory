@@ -12,23 +12,24 @@ from pathlib import Path
 
 async def check():
     # AstrBot imports initialize some runtime assets; isolate those too.
-    sandbox = tempfile.TemporaryDirectory(prefix="evidence-sdk-runtime-")
+    sandbox = tempfile.TemporaryDirectory(prefix="eyewitness-sdk-runtime-")
     previous_root = os.environ.get("ASTRBOT_ROOT")
     os.environ["ASTRBOT_ROOT"] = sandbox.name
     from astrbot.api.provider import ProviderRequest
     from astrbot.core.agent.message import Message, dump_messages_with_checkpoints
 
     root = Path(__file__).resolve().parents[1]
-    package = types.ModuleType("evidence_plugin_check")
+    package = types.ModuleType("eyewitness_plugin_check")
     package.__path__ = [str(root)]
     sys.modules[package.__name__] = package
-    spec = importlib.util.spec_from_file_location("evidence_plugin_check.main", root / "main.py")
+    spec = importlib.util.spec_from_file_location("eyewitness_plugin_check.main", root / "main.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
 
     class Context:
         def register_web_api(self, *args):
+            assert args[0].startswith("/astrbot_plugin_eyewitness_memory/")
             assert args[0].endswith(("/panel", "/api"))
 
         def get_all_providers(self):
@@ -61,9 +62,14 @@ async def check():
         def get_messages(self):
             return []
 
-    with tempfile.TemporaryDirectory(prefix="evidence-astrbot-check-") as tmp:
-        module.StarTools.get_data_dir = lambda *_: Path(tmp)
-        plugin = module.EvidenceMemoryPlugin(
+    with tempfile.TemporaryDirectory(prefix="eyewitness-astrbot-check-") as tmp:
+
+        def data_dir(name):
+            assert name == "astrbot_plugin_eyewitness_memory"
+            return Path(tmp)
+
+        module.StarTools.get_data_dir = data_dir
+        plugin = module.EyewitnessMemoryPlugin(
             Context(), {"panel_host": "127.0.0.1", "panel_port": 0}
         )
         await plugin.initialize()

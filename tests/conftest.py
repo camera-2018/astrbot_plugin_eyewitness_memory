@@ -2,8 +2,8 @@ import time
 
 import pytest_asyncio
 
-from evidence.models import Candidate, Settings
-from evidence.store import Store
+from eyewitness.models import Candidate, Settings
+from eyewitness.store import Store
 
 SCOPE = "default:GroupMessage:100"
 OTHER = "default:GroupMessage:200"

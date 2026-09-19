@@ -1,7 +1,7 @@
-name: astrbot_plugin_evidence_memory
+name: astrbot_plugin_eyewitness_memory
 display_name: 群聊记忆
 desc: 自动提取和核验群聊记忆，通过 AstrBot 插件页面管理。
-version: v0.1.3
+version: v0.1.4
 author: piexian
 repo: https://github.com/camera-2018/astrbot_plugin_eyewitness_memory
 astrbot_version: ">=4.28.1,<5"

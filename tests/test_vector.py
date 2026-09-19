@@ -1,7 +1,7 @@
 from aiohttp import web
 
-from evidence.models import Settings
-from evidence.vector import VectorIndex
+from eyewitness.models import Settings
+from eyewitness.vector import VectorIndex
 from tests.conftest import SCOPE
 
 
