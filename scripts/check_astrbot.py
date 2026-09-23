@@ -18,6 +18,7 @@ async def check():
     os.environ["ASTRBOT_ROOT"] = sandbox.name
     from astrbot.api.provider import ProviderRequest
     from astrbot.core.agent.message import Message, dump_messages_with_checkpoints
+    from astrbot.core.agent.tool import FunctionTool, ToolSet
     from astrbot.core.config import AstrBotConfig
 
     root = Path(__file__).resolve().parents[1]
@@ -30,6 +31,8 @@ async def check():
     spec.loader.exec_module(module)
 
     class Context:
+        tool_schema_mode = "skills_like"
+
         def register_web_api(self, *args):
             assert args[0].startswith("/astrbot_plugin_eyewitness_memory/")
             assert args[0].endswith(("/panel", "/api"))
@@ -43,6 +46,12 @@ async def check():
         async def get_using_provider_async(self, umo):
             assert umo == Event.unified_msg_origin
             return types.SimpleNamespace(provider_config={"max_context_tokens": 8192})
+
+        def get_config(self, umo):
+            assert umo == Event.unified_msg_origin
+            return {
+                "agent_runner": {"config": {"misc": {"tool_schema_mode": self.tool_schema_mode}}}
+            }
 
     class Event:
         unified_msg_origin = "default:GroupMessage:100"
@@ -146,12 +155,39 @@ async def check():
             crowded = ProviderRequest(
                 prompt="本轮消息",
                 system_prompt="系统提示词",
-                contexts=[{"role": "user", "content": "历史消息" * 1500}],
+                contexts=[{"role": "user", "content": "历史消息" * 3000}],
             )
             limited, _ = await request_budget(plugin.context, Event(), crowded)
             assert limited.available == 0 and "上下文预算" in limited.reason
+            assert limited.native_messages > 0
+            assert limited.estimated_messages < limited.message_chars
+            tools = ToolSet(
+                tools=[
+                    FunctionTool(
+                        name="lookup",
+                        description="Lookup an item",
+                        parameters={
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Long parameter guidance " * 100,
+                                }
+                            },
+                            "required": ["query"],
+                        },
+                    )
+                ]
+            )
+            schema_req = ProviderRequest(prompt="查找", func_tool=tools)
+            light, _ = await request_budget(plugin.context, Event(), schema_req)
+            plugin.context.tool_schema_mode = "full"
+            full, _ = await request_budget(plugin.context, Event(), schema_req)
+            assert light.tool_schema_mode == "skills_like"
+            assert light.estimated_tools < full.estimated_tools
+            assert schema_req.func_tool is tools
             print(
-                "PASS: raw platform timestamp, dynamic token budget, user-tail append, persistent snapshot, unchanged system/history across two turns"
+                "PASS: raw timestamp, light tool budget, persistent user-tail append, unchanged system/history"
             )
             cfg.mode = "off"
             await plugin.store.call("save_settings", cfg)

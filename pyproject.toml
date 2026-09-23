@@ -1,6 +1,6 @@
 [project]
 name = "astrbot-plugin-eyewitness-memory"
-version = "0.1.8"
+version = "0.1.10"
 description = "Evidence-first automatic group memory for AstrBot"
 requires-python = ">=3.11"
 dependencies = ["aiohttp>=3.10,<4", "pydantic>=2.10,<3"]

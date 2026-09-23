@@ -18,9 +18,21 @@ class InjectionBudget:
     reserved: int
     available: int
     reason: str = ""
+    estimated_messages: int = 0
+    estimated_tools: int = 0
+    tool_schema_mode: str = ""
+    native_messages: int = 0
+    message_chars: int = 0
 
 
-def plan_budget(context_limit: int, estimated_input: int, tool_tokens: int = 0) -> InjectionBudget:
+def plan_budget(
+    context_limit: int,
+    estimated_input: int,
+    tool_tokens: int = 0,
+    tool_schema_mode: str = "",
+    native_messages: int = 0,
+    message_chars: int = 0,
+) -> InjectionBudget:
     """Leave 20% model-window slack plus an output allowance before adding memory."""
     output_reserve = min(4096, max(512, context_limit // 10))
     usable = max(0, int(context_limit * 0.8) - output_reserve)
@@ -32,6 +44,11 @@ def plan_budget(context_limit: int, estimated_input: int, tool_tokens: int = 0) 
         reserved=context_limit - usable,
         available=available,
         reason="" if available else "本轮输入和工具已占满保守上下文预算",
+        estimated_messages=estimated_input,
+        estimated_tools=tool_tokens,
+        tool_schema_mode=tool_schema_mode,
+        native_messages=native_messages,
+        message_chars=message_chars,
     )
 
 
@@ -41,7 +58,11 @@ def unavailable(reason: str) -> InjectionBudget:
 
 async def request_budget(context, event, req) -> tuple[InjectionBudget, Callable[[str], int]]:
     """Estimate a fresh request; never reuse the previous response's token_usage."""
-    from astrbot.core.agent.context.token_counter import EstimateTokenCounter
+    from astrbot.core.agent.context.token_counter import (
+        AUDIO_TOKEN_ESTIMATE,
+        IMAGE_TOKEN_ESTIMATE,
+        EstimateTokenCounter,
+    )
     from astrbot.core.agent.message import (
         AudioURLPart,
         ImageURLPart,
@@ -82,6 +103,10 @@ async def request_budget(context, event, req) -> tuple[InjectionBudget, Callable
         return unavailable("模型上下文上限未知"), text_cost
 
     try:
+        runner_config = context.get_config(event.unified_msg_origin)["agent_runner"]["config"]
+        tool_schema_mode = runner_config["misc"].get("tool_schema_mode", "full")
+        if tool_schema_mode not in ("full", "skills_like"):
+            tool_schema_mode = "full"
         messages = []
         if req.system_prompt:
             messages.append(Message(role="system", content=req.system_prompt))
@@ -100,39 +125,60 @@ async def request_budget(context, event, req) -> tuple[InjectionBudget, Callable
 
         native_tokens = counter.count_tokens(messages)
         text_chars = 0
-        media_tokens = 0
+        media_extra = 0
+        non_bmp = 0
         for message in messages:
             parts = message.content
             if isinstance(parts, str):
                 text_chars += len(parts)
+                non_bmp += sum(ord(char) > 0xFFFF for char in parts)
             elif isinstance(parts, list):
                 for part in parts:
                     if isinstance(part, TextPart):
                         text_chars += len(part.text)
+                        non_bmp += sum(ord(char) > 0xFFFF for char in part.text)
                     elif isinstance(part, ThinkPart):
                         text_chars += len(part.think)
+                        non_bmp += sum(ord(char) > 0xFFFF for char in part.think)
                     elif isinstance(part, ImageURLPart):
-                        media_tokens += 2300
+                        media_extra += max(0, 2300 - IMAGE_TOKEN_ESTIMATE)
                     elif isinstance(part, AudioURLPart):
-                        media_tokens += 1500
+                        media_extra += max(0, 1500 - AUDIO_TOKEN_ESTIMATE)
                     else:
                         return unavailable("历史含未知内容类型，无法安全估算"), text_cost
             if message.tool_calls:
-                text_chars += len(
-                    json.dumps(
-                        [
-                            tc if isinstance(tc, dict) else tc.model_dump()
-                            for tc in message.tool_calls
-                        ],
-                        ensure_ascii=False,
-                    )
+                call_text = json.dumps(
+                    [tc if isinstance(tc, dict) else tc.model_dump() for tc in message.tool_calls],
+                    ensure_ascii=False,
                 )
-        estimated_input = max(math.ceil(native_tokens * 1.5), text_chars + media_tokens)
+                text_chars += len(call_text)
+                non_bmp += sum(ord(char) > 0xFFFF for char in call_text)
+        # The 20% window slack and separately over-counted tool schemas already
+        # cover tokenization drift. A one-token-per-character floor grossly
+        # over-counts long Chinese histories and suppresses every recall.
+        estimated_input = math.ceil(native_tokens * 1.15) + media_extra + 2 * non_bmp
         tool_tokens = 0
         if req.func_tool and not req.func_tool.empty():
-            tools_json = json.dumps(req.func_tool.openai_schema(), ensure_ascii=False)
-            tool_tokens = text_cost(tools_json)
-        return plan_budget(limit, estimated_input, tool_tokens), text_cost
+            modalities = config.get("modalities")
+            if not (isinstance(modalities, list) and modalities and "tool_use" not in modalities):
+                tools = (
+                    req.func_tool.get_light_tool_set()
+                    if tool_schema_mode == "skills_like"
+                    else req.func_tool
+                )
+                tools_json = json.dumps(tools.openai_schema(), ensure_ascii=False)
+                tool_tokens = text_cost(tools_json)
+        return (
+            plan_budget(
+                limit,
+                estimated_input,
+                tool_tokens,
+                tool_schema_mode,
+                native_tokens,
+                text_chars,
+            ),
+            text_cost,
+        )
     except Exception:
         return unavailable("请求结构无法安全估算"), text_cost
 

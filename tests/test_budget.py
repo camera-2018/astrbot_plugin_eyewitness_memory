@@ -9,6 +9,8 @@ def test_headroom_shrinks_as_history_and_tools_grow():
     assert 0 < large.available < small.available
     assert plan_budget(8192, 7000).available == 0
     assert small.reserved >= 512
+    assert small.estimated_messages == 1000
+    assert small.estimated_tools == 500
 
 
 async def test_token_budget_discards_neighbors_but_keeps_source(store):
@@ -49,3 +51,7 @@ async def test_tiny_budget_omits_all_instead_of_clipping_source(store):
 
 def test_budget_metadata_is_data_only():
     assert InjectionBudget(8192, 1000, 2000, 5192).available == 5192
+    detailed = plan_budget(8192, 1000, 500, "skills_like", 870, 1450)
+    assert detailed.estimated_input == 1500
+    assert detailed.native_messages == 870
+    assert detailed.message_chars == 1450
