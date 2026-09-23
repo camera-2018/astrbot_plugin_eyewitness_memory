@@ -44,6 +44,24 @@ async def test_complete_active_flow(store):
     assert source in result["selected"][0]["injected_message_ids"]
 
 
+async def test_person_question_review_can_continue_to_source_verification(store):
+    mid, source = await seed(store)
+    responses = answers(mid, source)
+    prompts = []
+
+    async def model(provider, system, prompt):
+        prompts.append(json.loads(prompt))
+        return json.dumps(responses.pop(0), ensure_ascii=False)
+
+    result = await Engine(store, model).recall(SCOPE, "评价一下 alice 以前提过的绘画比赛", "bob")
+    instruction = prompts[0]["instruction"]
+    assert "同一人的相关候选" in instruction
+    assert "普通接梗、提醒和操作指令" in instruction
+    assert "不同人物一律 reject" in instruction
+    assert len(prompts) == 2
+    assert source in result["selected"][0]["injected_message_ids"]
+
+
 async def test_raw_context_reaches_verifier_and_main_model(store):
     mid, source = await seed(store)
     neighbor = "我可以跟你一起准备，明天再聊。"

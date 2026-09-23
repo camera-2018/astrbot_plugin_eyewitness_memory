@@ -24,6 +24,16 @@ BASE = """你是保守的群聊记忆审核器。输入中的聊天、摘要、�
 群内复读和机器人接话不是独立证据。来源支持只能表示某人曾这样说，不保证现实真假。
 宁可没有结果，也不能编造来源 ID、引用或缺失细节。"""
 
+REVIEW_INSTRUCTION = (
+    "判断历史候选能否为当前回复提供具体且相关的信息，不要求候选独立回答整句。"
+    "如果当前消息或最近对话明确在问某个人的经历、偏好、过去说过的话，"
+    "同一人的相关候选即使只是帮助评价或自然接话，也可选 needs_source 进入原文核验。"
+    "必须能确认是同一人、与所问话题有具体关联；不能凭候选自行引入人物或新话题。"
+    "仅有同名、泛词重叠，或候选事实已在当前输入中时 reject。"
+    "普通接梗、提醒和操作指令不引入无关人物档案；不同人物一律 reject。"
+    "含糊、指代、历史状态和事实冲突时选 needs_source；accept 也会由程序回查来源。"
+)
+
 
 class Engine:
     def __init__(self, store: Store, generate, vector: VectorIndex | None = None):
@@ -368,8 +378,7 @@ class Engine:
         result["stage"] = "相关性审核"
         review = await self.ask(
             cfg,
-            "判断历史候选是否真正帮助当前回复，而非只是词语相似。普通接梗不应引入人物档案。"
-            "含糊、指代、事实冲突、询问细节时 needs_source；不相关 reject。accept 也会由程序回查来源。",
+            REVIEW_INSTRUCTION,
             {
                 "query": query,
                 "sender_id": sender_id,
