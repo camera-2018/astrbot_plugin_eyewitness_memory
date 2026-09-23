@@ -6,7 +6,7 @@ import time
 import pytest
 from pydantic import ValidationError
 
-from eyewitness.models import Candidate, Settings, low_signal
+from eyewitness.models import Candidate, Settings, extraction_noise, low_signal
 from tests.conftest import OTHER, SCOPE, seed
 
 
@@ -52,6 +52,34 @@ async def test_capture_idempotent_and_secret_redaction(store):
     assert a == b
     rows = await store.call("recent", SCOPE)
     assert len(rows) == 1 and "secret123" not in rows[0]["text"]
+
+
+@pytest.mark.parametrize(
+    "text", ["🚀🚀", "[Image]", "[CQ:image,file=foo]", "https://example.com", "哈哈", "我去"]
+)
+async def test_noise_remains_in_context_but_not_extraction_queue(store, text):
+    mid = await store.call("capture", SCOPE, text, "u", "小明", text)
+    row = (await store.call("source_rows", SCOPE, [mid]))[0]
+    assert row["text"] == text
+    assert row["processed"] == 2
+    assert extraction_noise(text)
+
+
+@pytest.mark.parametrize("text", ["国企", "香芋味", "画风也很舒适", "我报名了摄影比赛"])
+async def test_short_meaningful_message_is_still_extractable(store, text):
+    mid = await store.call("capture", SCOPE, text, "u", "小明", text)
+    row = (await store.call("source_rows", SCOPE, [mid]))[0]
+    assert row["processed"] == 0
+    assert not extraction_noise(text)
+
+
+async def test_existing_pending_noise_is_backfilled_without_losing_source(store):
+    mid = await store.call("capture", SCOPE, "old-emoji", "u", "小明", "🚀🚀")
+    with store.db:
+        store.db.execute("UPDATE messages SET processed=0 WHERE id=?", (mid,))
+    assert await store.call("skip_existing_noise") == 1
+    assert (await store.call("source_rows", SCOPE, [mid]))[0]["processed"] == 2
+    assert await store.call("skip_existing_noise") == 0
 
 
 async def test_sources_isolated_and_search_chinese(store):
@@ -124,10 +152,10 @@ async def test_erase_also_removes_versions_and_sources(store):
     assert await store.call("detail", other)
 
 
-async def test_budget_persisted(store):
-    assert await store.call("reserve_call", 1)
-    assert not await store.call("reserve_call", 1)
-    assert (await store.call("stats"))["calls_today"] == 1
+async def test_call_usage_persisted(store):
+    await store.call("record_call")
+    await store.call("record_call")
+    assert (await store.call("stats"))["calls_today"] == 2
 
 
 async def test_deleted_source_cannot_be_resurrected(store):

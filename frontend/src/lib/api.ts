@@ -79,7 +79,6 @@ export type Settings = {
   extraction_timeout: number;
   batch_size: number;
   batch_age_seconds: number;
-  daily_calls: number;
   retention_days: number;
   trace_days: number;
   max_db_mb: number;
@@ -90,6 +89,8 @@ export type Recall = {
   mode: string;
   injection: string;
   elapsed_ms?: number;
+  vector_fallback?: boolean;
+  vector_error?: string;
   selected: { id: string; text: string }[];
   candidates: {
     id: string;

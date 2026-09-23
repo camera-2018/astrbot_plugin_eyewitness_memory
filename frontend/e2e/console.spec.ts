@@ -78,21 +78,21 @@ test("AstrBot bridge, source inspection, edit, preview and settings without toke
 test("stale settings do not overwrite another editor", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "设置", exact: true }).click();
-  const budget = page.getByLabel("每日辅助模型调用上限（UTC）", { exact: true });
-  await expect(budget).toBeVisible();
-  await budget.fill("250");
+  const batchSize = page.getByLabel("后台每批消息上限", { exact: true });
+  await expect(batchSize).toBeVisible();
+  await batchSize.fill("45");
   const original = await page.evaluate(async () => {
     const bridge = window.AstrBotPluginPage!;
     const cfg = await bridge.apiPost("api", { path: "settings" }) as Record<string, unknown>;
-    await bridge.apiPost("api", { path: "settings", method: "PUT", body: { ...cfg, daily_calls: 300 } });
-    return cfg.daily_calls;
+    await bridge.apiPost("api", { path: "settings", method: "PUT", body: { ...cfg, batch_size: 50 } });
+    return cfg.batch_size;
   });
   await page.getByRole("button", { name: "保存设置", exact: true }).click();
   await expect(page.getByText("请求无效或数据版本冲突，请检查并刷新", { exact: true })).toBeVisible();
   page.once("dialog", d => d.accept());
   await page.getByRole("button", { name: "重新读取配置", exact: true }).click();
-  await expect(budget).toHaveValue("300");
-  await budget.fill(String(original));
+  await expect(batchSize).toHaveValue("50");
+  await batchSize.fill(String(original));
   await page.getByRole("button", { name: "保存设置", exact: true }).click();
   await expect(page.getByRole("status")).toHaveText("设置已保存");
 });

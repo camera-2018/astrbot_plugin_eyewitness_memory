@@ -4,8 +4,14 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import asdict
+from typing import Callable
 
+from pydantic import ValidationError
+
+from .budget import InjectionBudget, fit_memory_block
 from .context import context_message, memory_marker, message_time, render_memory
+from .errors import AuxiliaryModelFailure, failure_detail
 from .models import Extraction, Review, Settings, Verification, low_signal, safe_text
 from .store import Store
 from .vector import VectorIndex
@@ -43,23 +49,33 @@ class Engine:
             await self.vector.close()
 
     async def ask(self, cfg: Settings, instruction: str, data: dict, schema):
+        stage = {Extraction: "后台提取", Review: "相关性审核", Verification: "原文核验"}.get(
+            schema, "辅助模型"
+        )
         if not cfg.provider_id:
-            raise ValueError("未配置辅助模型 provider")
-        if not await self.store.call("reserve_call", cfg.daily_calls):
-            raise ValueError("辅助模型每日调用预算已用完")
+            raise AuxiliaryModelFailure(f"{stage}：未配置辅助模型")
         prompt = json.dumps(
             {"instruction": instruction, "schema": schema.model_json_schema(), "data": data},
             ensure_ascii=False,
         )
         if len(prompt) > 40000:
-            raise ValueError("记忆模型输入超出字符预算")
-        raw = await self.generate(cfg.provider_id, BASE, prompt)
+            raise AuxiliaryModelFailure(f"{stage}：输入超出字符预算")
+        await self.store.call("record_call")
+        try:
+            raw = await self.generate(cfg.provider_id, BASE, prompt)
+        except Exception as exc:
+            raise AuxiliaryModelFailure(f"{stage}：{failure_detail(exc)}") from exc
+        if not isinstance(raw, str) or not raw.strip():
+            raise AuxiliaryModelFailure(f"{stage}：模型返回空内容或非文本")
         if len(raw) > 16000:
-            raise ValueError("记忆模型输出过长")
+            raise AuxiliaryModelFailure(f"{stage}：模型输出过长")
         stripped = raw.strip()
         if stripped.startswith("```json") and stripped.endswith("```"):
             stripped = stripped[7:-3].strip()
-        return schema.model_validate_json(stripped)
+        try:
+            return schema.model_validate_json(stripped)
+        except ValidationError as exc:
+            raise AuxiliaryModelFailure(f"{stage}：{failure_detail(exc)}") from exc
 
     async def extract_once(self, cfg: Settings):
         if time.time() < self.extraction_retry_at:
@@ -104,6 +120,8 @@ class Engine:
     async def index_once(self, cfg: Settings):
         if not self.vector or not self.vector.enabled(cfg):
             return
+        indexed = False
+        failed = False
         for job in await self.store.call("index_jobs"):
             mid = job["memory_id"]
             m = await self.store.call("detail", mid)
@@ -113,9 +131,14 @@ class Engine:
                 else:
                     await self.vector.delete(cfg, mid)
                 await self.store.call("index_done", mid, m["version"] if m else None)
+                indexed = True
             except Exception as exc:
-                self.last_error = "向量索引暂不可用：" + type(exc).__name__
+                failed = True
+                self.last_error = "向量索引暂不可用：" + failure_detail(exc)
+                log.warning("Eyewitness Memory %s", self.last_error)
                 await self.store.call("index_failed", mid, job["attempts"])
+        if indexed and not failed and self.last_error.startswith("向量索引暂不可用："):
+            self.last_error = ""
 
     async def worker(self):
         while True:
@@ -128,12 +151,21 @@ class Engine:
                             await self.extract_once(cfg)
                         except Exception as exc:
                             self.extraction_retry_at = time.time() + 300
-                            self.last_error = "提取暂缓：" + type(exc).__name__
+                            self.last_error = "提取暂缓：" + failure_detail(exc)
+                            log.warning("Eyewitness Memory %s", self.last_error)
+                        else:
+                            if (
+                                time.time() >= self.extraction_retry_at
+                                and self.last_error.startswith("提取暂缓：")
+                            ):
+                                self.last_error = ""
+                            if time.time() >= self.extraction_retry_at:
+                                self.extraction_retry_at = 0.0
                     await self.index_once(cfg)
                 self.last_cycle = time.time()
             except Exception as exc:
-                self.last_error = "后台任务异常：" + type(exc).__name__
-                log.warning("Eyewitness Memory worker: %s", type(exc).__name__)
+                self.last_error = "后台任务异常：" + failure_detail(exc)
+                log.warning("Eyewitness Memory worker: %s", self.last_error)
             await asyncio.sleep(30)
 
     async def recall(
@@ -144,16 +176,31 @@ class Engine:
         reply_id: str = "",
         visible: str = "",
         preview: bool = False,
+        budget: InjectionBudget | None = None,
+        count_injection_tokens: Callable[[str], int] | None = None,
     ):
         cfg = await self.store.call("get_settings")
         privacy_epoch = await self.store.call("epoch")
         started = time.monotonic()
-        result = {"selected": [], "candidates": [], "reason": "", "injection": "", "mode": cfg.mode}
+        result = {
+            "selected": [],
+            "candidates": [],
+            "reason": "",
+            "injection": "",
+            "mode": cfg.mode,
+            "stage": "检索",
+        }
+        if budget is not None:
+            result["context_budget"] = asdict(budget)
         if cfg.mode == "off" or scope not in cfg.allowed_scopes:
             result["reason"] = "作用域未启用"
             return result
         query = safe_text(query, 1500)
-        if low_signal(query, bool(reply_id)):
+        if budget is not None and (budget.available <= 0 or count_injection_tokens is None):
+            result["reason"] = "上下文余量不足，跳过记忆注入：" + (
+                budget.reason or "无法安全估算本轮输入"
+            )
+        elif low_signal(query, bool(reply_id)):
             result["reason"] = "低信息消息，无需长期记忆"
         elif self.online.locked():
             result["reason"] = "记忆并发已满，跳过以保证正常回复"
@@ -163,9 +210,9 @@ class Engine:
                     async with asyncio.timeout(cfg.online_timeout):
                         await self._recall(cfg, scope, query, sender_id, reply_id, visible, result)
             except TimeoutError:
-                result["reason"] = "达到记忆时间预算，未完成核验的候选不注入"
+                result["reason"] = result["stage"] + "达到记忆时间预算，未完成核验的候选不注入"
             except Exception as exc:
-                result["reason"] = "记忆流程降级：" + type(exc).__name__
+                result["reason"] = "记忆流程降级：" + failure_detail(exc)
         # Recheck active state after awaits; deleted/edited/expired memories cannot escape here.
         current = await self.store.call("get_settings")
         if current.mode == "off" or scope not in current.allowed_scopes:
@@ -197,8 +244,20 @@ class Engine:
         remaining = current.injection_chars - len(prefix)
         delivered = []
         seen_ids = set()
+        omitted_reason = ""
         for item in valid[:2]:
-            block, ids = render_memory(item, remaining, seen_ids)
+            if budget is None:
+                block, ids = render_memory(item, remaining, seen_ids)
+                omitted = "chars" if not block else ""
+            else:
+                block, ids, omitted = fit_memory_block(
+                    item,
+                    remaining,
+                    budget.available,
+                    prefix + "\n".join(blocks),
+                    count_injection_tokens,
+                    seen_ids,
+                )
             if block:
                 blocks.append(block)
                 remaining -= len(block) + 1
@@ -206,11 +265,33 @@ class Engine:
                 item["reused_message_ids"] = sorted({r["id"] for r in item["context"]} & seen_ids)
                 seen_ids.update(ids)
                 delivered.append(item)
+            elif not omitted_reason:
+                omitted_reason = omitted
         result["selected"] = delivered
         if blocks:
             result["injection"] = prefix + "\n".join(blocks)
+            if (
+                budget is not None
+                and count_injection_tokens is not None
+                and count_injection_tokens(result["injection"]) > budget.available
+            ):
+                result.update(
+                    selected=[],
+                    injection="",
+                    reason="上下文预算最终校验未通过，记忆未注入",
+                )
+            elif omitted_reason:
+                result["reason"] = (
+                    "来源核验完成；部分候选因上下文余量未注入"
+                    if omitted_reason == "tokens"
+                    else "来源核验完成；部分候选因字数预算未注入"
+                )
         elif valid:
-            result["reason"] = "来源核验通过，但字数预算不足以保留原文，未注入"
+            result["reason"] = (
+                "来源核验通过，但上下文余量不足以保留必要原文，未注入"
+                if omitted_reason == "tokens"
+                else "来源核验通过，但字数预算不足以保留原文，未注入"
+            )
         result["mode"] = current.mode
         result["elapsed_ms"] = round((time.monotonic() - started) * 1000)
         trace_id = await self.store.call(
@@ -255,8 +336,9 @@ class Engine:
                         ):
                             candidates.append(m)
                             known.add(m["id"])
-            except Exception:
+            except Exception as exc:
                 result["vector_fallback"] = True
+                result["vector_error"] = failure_detail(exc)
         candidates = [
             m
             for m in candidates
@@ -283,6 +365,7 @@ class Engine:
         if not candidates:
             result["reason"] = "没有合适的历史候选"
             return
+        result["stage"] = "相关性审核"
         review = await self.ask(
             cfg,
             "判断历史候选是否真正帮助当前回复，而非只是词语相似。普通接梗不应引入人物档案。"
@@ -313,6 +396,7 @@ class Engine:
             evidence = await self.store.call("source_context", d.id, scope)
             if not evidence:
                 continue
+            result["stage"] = "原文核验"
             verification = await self.ask(
                 cfg,
                 "核验候选与来源是否一致且能回答本轮问题。只复述有逐字引用支持的限定信息；"

@@ -65,6 +65,19 @@ async def test_one_time_migration_preserves_old_choices_and_key(store):
     assert (await store.call("get_settings")).provider_id == ""
 
 
+async def test_retired_daily_limit_in_snapshot_is_ignored(store):
+    old = await store.call("get_settings")
+    old_data = {**old.model_dump(), "daily_calls": 200}
+    store.db.execute("UPDATE settings SET data=? WHERE id=1", (json.dumps(old_data),))
+    store.db.commit()
+    config = NativeConfig()
+    await store.call("bind_config", config)
+    assert await store.call("get_settings") == old
+    assert "daily_calls" not in config.persisted
+    cached = json.loads(store.db.execute("SELECT data FROM settings WHERE id=1").fetchone()[0])
+    assert "daily_calls" not in cached
+
+
 async def test_native_non_default_choices_win_first_migration(store):
     config = NativeConfig(provider_id="native-choice")
     await store.call("bind_config", config)

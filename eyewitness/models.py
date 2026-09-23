@@ -17,9 +17,8 @@ class Settings(BaseModel):
     collection: str = "eyewitness_memory_v1"
     online_timeout: float = Field(default=3.0, ge=0.5, le=30)
     extraction_timeout: float = Field(default=60.0, ge=5, le=180)
-    batch_size: int = Field(default=40, ge=5, le=100)
+    batch_size: int = Field(default=80, ge=5, le=100)
     batch_age_seconds: int = Field(default=900, ge=60, le=86400)
-    daily_calls: int = Field(default=200, ge=0, le=10000)
     retention_days: int = Field(default=30, ge=1, le=365)
     trace_days: int = Field(default=7, ge=1, le=90)
     max_db_mb: int = Field(default=512, ge=16, le=4096)
@@ -136,3 +135,35 @@ def low_signal(text: str, has_reference: bool = False) -> bool:
         "收到",
         "笑了",
     }
+
+
+EXTRACTION_ONLY_REACTIONS = {
+    "我去",
+    "不是",
+    "难绷",
+    "666",
+    "呜呜呜",
+    "何意味",
+    "还真是",
+    "隐忍",
+    "震惊瘫坐",
+    "哦牛批",
+    "不知道",
+    "好家伙",
+}
+EXTRACTION_MARKUP = re.compile(
+    r"\[CQ:[^\]]+\]|\[At:[^\]]+\]|\[[A-Za-z]+\]|"
+    r"@[^\s@()]{1,40}\(\d+\)|https?://\S+"
+)
+EXTRACTION_CONTENT = re.compile(r"[\u3400-\u9fffA-Za-z0-9]")
+
+
+def extraction_noise(text: str, has_reference: bool = False) -> bool:
+    """Skip obvious non-facts; keep the original row for source context."""
+    visible = EXTRACTION_MARKUP.sub("", text).strip()
+    if not EXTRACTION_CONTENT.search(visible):
+        return True
+    if low_signal(text, has_reference):
+        return True
+    plain = re.sub(r"[\s，。！？!?~～（）()…]+", "", visible)
+    return not has_reference and plain in EXTRACTION_ONLY_REACTIONS

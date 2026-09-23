@@ -2,6 +2,7 @@ import asyncio
 import json
 import time
 
+from eyewitness.budget import InjectionBudget
 from eyewitness.engine import Engine
 from tests.conftest import OTHER, SCOPE, seed
 
@@ -74,6 +75,29 @@ async def test_injection_budget_never_emits_summary_without_required_source(stor
     assert "字数预算" in result["reason"]
 
 
+async def test_unknown_context_budget_skips_model_and_records_reason(store):
+    await seed(store)
+    model = Model([])
+    budget = InjectionBudget(0, 0, 0, 0, "模型上下文上限未知")
+    result = await Engine(store, model).recall(
+        SCOPE, "绘画比赛", budget=budget, count_injection_tokens=len
+    )
+    assert not result["injection"] and model.calls == 0
+    assert "模型上下文上限未知" in result["reason"]
+    assert (await store.call("traces", SCOPE))[0]["reason"] == result["reason"]
+
+
+async def test_tiny_dynamic_budget_keeps_model_reply_but_omits_memory(store):
+    mid, source = await seed(store)
+    budget = InjectionBudget(8192, 7000, 1100, 80)
+    result = await Engine(store, Model(answers(mid, source))).recall(
+        SCOPE, "绘画比赛", budget=budget, count_injection_tokens=len
+    )
+    assert not result["injection"] and not result["selected"]
+    assert "上下文余量不足以保留必要原文" in result["reason"]
+    assert (await store.call("traces", SCOPE))[0]["reason"] == result["reason"]
+
+
 async def test_retained_marker_prevents_duplicate_injection(store):
     from eyewitness.context import memory_marker
 
@@ -123,6 +147,46 @@ async def test_worker_shutdown(store):
     await entered.wait()
     await engine.close()
     assert engine.worker_task.done()
+
+
+async def test_extract_success_does_not_clear_unrecovered_index_error(store):
+    engine = Engine(store, Model([]))
+    engine.last_error = "向量索引暂不可用：上游 HTTP 503"
+    await engine.start()
+    for _ in range(50):
+        if engine.last_cycle:
+            break
+        await asyncio.sleep(0.01)
+    await engine.close()
+    assert engine.last_cycle > 0
+    assert engine.last_error == "向量索引暂不可用：上游 HTTP 503"
+
+
+async def test_index_error_clears_only_after_successful_retry(store):
+    await seed(store)
+
+    class FlakyVector:
+        calls = 0
+
+        def enabled(self, cfg):
+            return True
+
+        async def upsert(self, cfg, memory):
+            self.calls += 1
+            if self.calls == 1:
+                raise ConnectionError("private-host-details")
+
+        async def delete(self, cfg, mid):
+            pass
+
+    engine = Engine(store, Model([]), FlakyVector())
+    cfg = await store.call("get_settings")
+    await engine.index_once(cfg)
+    assert engine.last_error == "向量索引暂不可用：连接失败"
+    assert not await store.call("index_jobs")
+    await store.call("reindex")
+    await engine.index_once(cfg)
+    assert engine.last_error == ""
 
 
 async def test_disabled_recall_does_not_call_model(store):
@@ -216,16 +280,53 @@ async def test_delete_during_verification_does_not_recreate_private_trace(store)
     assert not await store.call("traces", SCOPE)
 
 
-async def test_invalid_json_and_no_budget_degrade(store):
+async def test_invalid_json_degrades(store):
     await seed(store)
     model = Model([{"nonsense": True}])
-    assert not (await Engine(store, model).recall(SCOPE, "绘画比赛"))["injection"]
-    cfg = await store.call("get_settings")
-    cfg.daily_calls = 0
-    await store.call("save_settings", cfg)
-    model = Model([])
-    assert not (await Engine(store, model).recall(SCOPE, "绘画比赛"))["selected"]
-    assert model.calls == 0
+    result = await Engine(store, model).recall(SCOPE, "绘画比赛")
+    assert not result["injection"]
+    assert "相关性审核" in result["reason"]
+    assert "多余字段" in result["reason"]
+    traces = await store.call("traces", SCOPE)
+    assert traces[0]["reason"] == result["reason"]
+
+
+async def test_upstream_status_diagnostic_does_not_leak_exception_text(store):
+    await seed(store)
+
+    class UpstreamError(Exception):
+        status_code = 429
+
+    async def model(*args):
+        raise UpstreamError("sk-test-very-private-provider-key")
+
+    result = await Engine(store, model).recall(SCOPE, "绘画比赛")
+    assert "相关性审核：上游 HTTP 429" in result["reason"]
+    assert "sk-test" not in json.dumps(result, ensure_ascii=False)
+    traces = await store.call("traces", SCOPE)
+    assert "sk-test" not in json.dumps(traces, ensure_ascii=False)
+
+
+async def test_empty_model_output_gives_specific_reason(store):
+    await seed(store)
+
+    async def model(*args):
+        return ""
+
+    result = await Engine(store, model).recall(SCOPE, "绘画比赛")
+    assert "相关性审核：模型返回空内容" in result["reason"]
+
+
+async def test_recall_continues_after_old_daily_limit(store):
+    await seed(store)
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    store.db.execute("INSERT OR REPLACE INTO budgets VALUES(?,200)", (day,))
+    store.db.commit()
+    model = Model([{"decisions": []}])
+    result = await Engine(store, model).recall(SCOPE, "绘画比赛")
+    assert result["reason"] == "候选未通过相关性或来源审核"
+    assert model.calls == 1
+    assert (await store.call("stats"))["calls_today"] == 201
 
 
 async def test_background_extraction_real_store_and_retry(store):

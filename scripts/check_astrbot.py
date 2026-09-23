@@ -40,6 +40,10 @@ async def check():
         def get_all_embedding_providers(self):
             return []
 
+        async def get_using_provider_async(self, umo):
+            assert umo == Event.unified_msg_origin
+            return types.SimpleNamespace(provider_config={"max_context_tokens": 8192})
+
     class Event:
         unified_msg_origin = "default:GroupMessage:100"
         message_obj = types.SimpleNamespace(
@@ -96,7 +100,9 @@ async def check():
             captured = (await plugin.store.call("recent", Event.unified_msg_origin))[0]
             assert captured["sent_at"] == Event.message_obj.raw_message["time"]
 
-            async def recall(*args):
+            async def recall(*args, **kwargs):
+                assert kwargs["budget"].available > 0
+                assert kwargs["count_injection_tokens"]("一段记忆") > 0
                 return {"mode": "active", "injection": "一条追加且随历史保留的测试记忆"}
 
             plugin.engine.recall = recall
@@ -135,14 +141,23 @@ async def check():
             await plugin.recall(Event(), req2)
             assert req2.contexts == history_before and req2.contexts[: len(previous)] == previous
             assert req2.system_prompt == req.system_prompt
+            from eyewitness_plugin_check.eyewitness.budget import request_budget
+
+            crowded = ProviderRequest(
+                prompt="本轮消息",
+                system_prompt="系统提示词",
+                contexts=[{"role": "user", "content": "历史消息" * 1500}],
+            )
+            limited, _ = await request_budget(plugin.context, Event(), crowded)
+            assert limited.available == 0 and "上下文预算" in limited.reason
             print(
-                "PASS: raw platform timestamp, user-tail append, persistent snapshot, unchanged system/history across two turns"
+                "PASS: raw platform timestamp, dynamic token budget, user-tail append, persistent snapshot, unchanged system/history across two turns"
             )
             cfg.mode = "off"
             await plugin.store.call("save_settings", cfg)
             called = False
 
-            async def unexpected_recall(*args):
+            async def unexpected_recall(*args, **kwargs):
                 nonlocal called
                 called = True
                 return {"mode": "active", "injection": "must not be used"}

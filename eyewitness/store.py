@@ -11,7 +11,7 @@ from typing import Any
 
 from .config import ConfigSettings, settings_revision
 from .context import bounded_context, context_message, message_order, message_time, platform_time
-from .models import Candidate, Settings, safe_text, terms
+from .models import Candidate, Settings, extraction_noise, safe_text, terms
 
 
 class Store:
@@ -111,12 +111,18 @@ class Store:
     def get_settings(self) -> Settings:
         if self.config_settings is not None:
             return self.config_settings.read()
+        return self._cached_settings() or Settings()
+
+    def _cached_settings(self) -> Settings | None:
         row = self.db.execute("SELECT data FROM settings WHERE id=1").fetchone()
-        return Settings.model_validate_json(row[0]) if row else Settings()
+        if not row:
+            return None
+        values = json.loads(row[0])
+        # Older snapshots can contain settings removed from the native schema.
+        return Settings.model_validate({k: values[k] for k in Settings.model_fields if k in values})
 
     def bind_config(self, config):
-        row = self.db.execute("SELECT data FROM settings WHERE id=1").fetchone()
-        previous = Settings.model_validate_json(row[0]) if row else None
+        previous = self._cached_settings()
         backend = ConfigSettings(config)
         current = backend.migrate(previous)
         self._cache_settings(previous or Settings(), current)
@@ -155,6 +161,15 @@ class Store:
             p.stat().st_size for p in [self.path, Path(str(self.path) + "-wal")] if p.exists()
         )
 
+    def skip_existing_noise(self) -> int:
+        rows = self.db.execute("SELECT id,text,reply_id FROM messages WHERE processed=0").fetchall()
+        skipped = [
+            (row["id"],) for row in rows if extraction_noise(row["text"], bool(row["reply_id"]))
+        ]
+        with self.db:
+            self.db.executemany("UPDATE messages SET processed=2 WHERE id=?", skipped)
+        return len(skipped)
+
     def capture(
         self,
         scope: str,
@@ -177,7 +192,7 @@ class Store:
         mid = str(uuid.uuid5(uuid.NAMESPACE_URL, scope + ":" + platform_id))
         with self.db:
             self.db.execute(
-                "INSERT OR IGNORE INTO messages(id,scope,platform_id,sender_id,sender_name,text,reply_id,created,sent_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO messages(id,scope,platform_id,sender_id,sender_name,text,reply_id,created,sent_at,processed) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     mid,
                     scope,
@@ -188,6 +203,7 @@ class Store:
                     reply_id,
                     created or time.time(),
                     platform_time(sent_at),
+                    2 if extraction_noise(text, bool(reply_id)) else 0,
                 ),
             )
         return mid
@@ -442,14 +458,11 @@ class Store:
             self.db.execute("DELETE FROM traces WHERE scope=?", (scope,))
         return len(ids)
 
-    def reserve_call(self, maximum: int):
+    def record_call(self):
         day = time.strftime("%Y-%m-%d", time.gmtime())
         with self.db:
             self.db.execute("INSERT OR IGNORE INTO budgets VALUES(?,0)", (day,))
-            result = self.db.execute(
-                "UPDATE budgets SET calls=calls+1 WHERE day=? AND calls<?", (day, maximum)
-            )
-        return result.rowcount == 1
+            self.db.execute("UPDATE budgets SET calls=calls+1 WHERE day=?", (day,))
 
     def epoch(self):
         return self.db.execute("SELECT value FROM privacy_epoch WHERE id=1").fetchone()[0]

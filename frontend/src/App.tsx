@@ -512,6 +512,11 @@ function RecallResult({ result }: { result: Recall }) {
         {result.reason} · {result.elapsed_ms ?? 0} ms · {result.selected.length}{" "}
         条通过
       </div>
+      {result.vector_fallback && (
+        <div className="notice">
+          向量检索已回退到关键词检索：{result.vector_error || "原因未知"}
+        </div>
+      )}
       {result.injection && (
         <div className="memory-card whitespace-pre-wrap text-sm leading-7">
           <h3 className="font-medium mb-3">拟注入内容</h3>
@@ -878,13 +883,12 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
           </Button>
         </section>
         <section className="memory-card space-y-5">
-          <h2 className="font-medium">预算与保留</h2>
+          <h2 className="font-medium">处理与保留</h2>
           <div className="grid sm:grid-cols-2 gap-5">
             {(
               [
                 ["online_timeout", "单次在线时间预算（秒）", 0.5, 30, 0.5],
                 ["extraction_timeout", "后台提取超时（秒）", 5, 180, 1],
-                ["daily_calls", "每日辅助模型调用上限（UTC）", 0, 10000, 1],
                 ["batch_size", "后台每批消息上限", 5, 100, 1],
                 ["batch_age_seconds", "未满批次最长等待（秒）", 60, 86400, 1],
                 ["retention_days", "未引用原文保留（天）", 1, 365, 1],

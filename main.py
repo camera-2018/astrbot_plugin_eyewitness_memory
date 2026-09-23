@@ -12,8 +12,10 @@ from astrbot.core.agent.message import TextPart
 from astrbot.core.config import AstrBotConfig
 
 from .eyewitness.admin import AdminAPI
+from .eyewitness.budget import request_budget
 from .eyewitness.context import history_markers, platform_time
 from .eyewitness.engine import Engine
+from .eyewitness.errors import failure_detail
 from .eyewitness.store import Store
 from .eyewitness.vector import VectorIndex
 
@@ -43,6 +45,7 @@ class EyewitnessMemoryPlugin(Star):
         try:
             await self.store.call("open")
             await self.store.call("bind_config", self.config)
+            await self.store.call("skip_existing_noise")
             # AstrBot versions without a dedicated embedding picker render these
             # options with their built-in select control instead of a free-text ID.
             schema = getattr(self.config, "schema", None)
@@ -127,7 +130,7 @@ class EyewitnessMemoryPlugin(Star):
                 else None,
             )
         except Exception as exc:
-            logger.warning("Eyewitness Memory 采集降级：%s", type(exc).__name__)
+            logger.warning("Eyewitness Memory 采集降级：%s", failure_detail(exc))
 
     @filter.on_llm_request(priority=-100)
     async def recall(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -166,11 +169,14 @@ class EyewitnessMemoryPlugin(Star):
                 self.reply_id(event),
                 history_markers(req.contexts) + "\n" + visible[:20000],
             )
-            result = await self.engine.recall(*args)
+            budget, count_tokens = await request_budget(self.context, event, req)
+            result = await self.engine.recall(
+                *args, budget=budget, count_injection_tokens=count_tokens
+            )
             if result["mode"] == "active" and result["injection"]:
                 req.extra_user_content_parts.append(TextPart(text=result["injection"]))
         except Exception as exc:
-            logger.warning("Eyewitness Memory 召回降级：%s", type(exc).__name__)
+            logger.warning("Eyewitness Memory 召回降级：%s", failure_detail(exc))
 
     async def terminate(self):
         self.ready = False
