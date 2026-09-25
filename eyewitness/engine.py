@@ -44,7 +44,6 @@ class Engine:
         self.worker_task: asyncio.Task | None = None
         self.last_error = ""
         self.last_cycle = 0.0
-        self.extraction_retry_at = 0.0
 
     async def start(self):
         if self.vector:
@@ -88,8 +87,6 @@ class Engine:
             raise AuxiliaryModelFailure(f"{stage}：{failure_detail(exc)}") from exc
 
     async def extract_once(self, cfg: Settings):
-        if time.time() < self.extraction_retry_at:
-            return
         batch = await self.store.call("pending_batch", cfg)
         if not batch:
             return
@@ -160,17 +157,11 @@ class Engine:
                         try:
                             await self.extract_once(cfg)
                         except Exception as exc:
-                            self.extraction_retry_at = time.time() + 300
-                            self.last_error = "提取暂缓：" + failure_detail(exc)
+                            self.last_error = "提取失败：" + failure_detail(exc)
                             log.warning("Eyewitness Memory %s", self.last_error)
                         else:
-                            if (
-                                time.time() >= self.extraction_retry_at
-                                and self.last_error.startswith("提取暂缓：")
-                            ):
+                            if self.last_error.startswith("提取失败："):
                                 self.last_error = ""
-                            if time.time() >= self.extraction_retry_at:
-                                self.extraction_retry_at = 0.0
                     await self.index_once(cfg)
                 self.last_cycle = time.time()
             except Exception as exc:

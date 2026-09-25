@@ -16,14 +16,18 @@ def failure_detail(exc: Exception) -> str:
     if isinstance(exc, AuxiliaryModelFailure):
         return str(exc)
     if isinstance(exc, ValidationError):
-        codes = {error["type"] for error in exc.errors(include_input=False)}
+        errors = exc.errors(include_input=False)
+        codes = {error["type"] for error in errors}
         if "json_invalid" in codes:
             return "模型返回的 JSON 无法解析"
         if "missing" in codes:
             return "模型返回的 JSON 缺少必需字段"
         if "extra_forbidden" in codes:
             return "模型返回的 JSON 包含多余字段"
-        return "模型返回的 JSON 字段类型或取值不符"
+        first = errors[0] if errors else {}
+        location = ".".join(str(part) for part in first.get("loc", ())) or "根对象"
+        error_type = str(first.get("type") or "unknown")
+        return f"模型返回字段 {location} 校验失败（{error_type}）"
     if isinstance(exc, TimeoutError):
         return "请求超时"
     if isinstance(exc, json.JSONDecodeError):

@@ -153,7 +153,7 @@ wheels = [
 
 [[package]]
 name = "astrbot-plugin-eyewitness-memory"
-version = "0.1.11"
+version = "0.1.12"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },

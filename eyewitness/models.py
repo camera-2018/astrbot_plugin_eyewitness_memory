@@ -56,7 +56,9 @@ class Settings(BaseModel):
 class EvidenceRef(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     message_id: str
-    quote: str = Field(min_length=2, max_length=1000)
+    # A one-character message can still be the exact source of a memory.
+    # Keep the non-empty guard, but do not reject valid evidence such as "X".
+    quote: str = Field(min_length=1, max_length=1000)
 
 
 class Candidate(BaseModel):
