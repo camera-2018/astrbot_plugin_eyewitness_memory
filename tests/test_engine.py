@@ -57,7 +57,7 @@ async def test_person_question_review_can_continue_to_source_verification(store)
     instruction = prompts[0]["instruction"]
     assert "同一人的相关候选" in instruction
     assert "普通接梗、提醒和操作指令" in instruction
-    assert "不同人物一律 reject" in instruction
+    assert "不一定是被问到的人" in instruction
     assert len(prompts) == 2
     assert source in result["selected"][0]["injected_message_ids"]
 

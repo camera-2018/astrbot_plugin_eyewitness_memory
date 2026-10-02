@@ -229,6 +229,12 @@ class Store:
             )
         ]
 
+    def referenced_message(self, scope: str, platform_id: str):
+        row = self.db.execute(
+            "SELECT * FROM messages WHERE scope=? AND platform_id=?", (scope, platform_id)
+        ).fetchone()
+        return dict(row) if row else None
+
     def pending_batch(self, cfg: Settings):
         now = time.time()
         for scope in cfg.allowed_scopes:

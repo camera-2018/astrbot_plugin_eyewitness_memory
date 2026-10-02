@@ -13,6 +13,7 @@ from .budget import InjectionBudget, fit_memory_block
 from .context import context_message, memory_marker, message_time, render_memory
 from .errors import AuxiliaryModelFailure, failure_detail
 from .models import Extraction, Review, Settings, Verification, low_signal, safe_text
+from .retrieval import conversation_hint, merge_rankings
 from .store import Store
 from .vector import VectorIndex
 
@@ -30,7 +31,10 @@ REVIEW_INSTRUCTION = (
     "同一人的相关候选即使只是帮助评价或自然接话，也可选 needs_source 进入原文核验。"
     "必须能确认是同一人、与所问话题有具体关联；不能凭候选自行引入人物或新话题。"
     "仅有同名、泛词重叠，或候选事实已在当前输入中时 reject。"
-    "普通接梗、提醒和操作指令不引入无关人物档案；不同人物一律 reject。"
+    "sender_id 是提问者，不一定是被问到的人；问其他群友时，应匹配被问者而不是提问者。"
+    "优先用当前消息、引用消息和 conversation 解析指代，recent 可能含群内无关插话。"
+    "普通接梗、提醒和操作指令不引入无关人物档案；主体不符或无法确定时 reject。"
+    "有明确话题关联的偏好、计划和过去发言可作背景，不必等用户明确要求回忆。"
     "含糊、指代、历史状态和事实冲突时选 needs_source；accept 也会由程序回查来源。"
 )
 
@@ -179,6 +183,7 @@ class Engine:
         preview: bool = False,
         budget: InjectionBudget | None = None,
         count_injection_tokens: Callable[[str], int] | None = None,
+        conversation: list | None = None,
     ):
         cfg = await self.store.call("get_settings")
         privacy_epoch = await self.store.call("epoch")
@@ -209,7 +214,16 @@ class Engine:
             try:
                 async with self.online:
                     async with asyncio.timeout(cfg.online_timeout):
-                        await self._recall(cfg, scope, query, sender_id, reply_id, visible, result)
+                        await self._recall(
+                            cfg,
+                            scope,
+                            query,
+                            sender_id,
+                            reply_id,
+                            visible,
+                            result,
+                            conversation_hint(conversation),
+                        )
             except TimeoutError:
                 result["reason"] = result["stage"] + "达到记忆时间预算，未完成核验的候选不注入"
             except Exception as exc:
@@ -311,43 +325,43 @@ class Engine:
             )
         return result
 
-    async def _recall(self, cfg, scope, query, sender_id, reply_id, visible, result):
+    async def _recall(self, cfg, scope, query, sender_id, reply_id, visible, result, conversation):
         recent = await self.store.call("recent", scope, 8)
+        quoted = await self.store.call("referenced_message", scope, reply_id) if reply_id else None
         # Context assists pronoun resolution; it is not blindly concatenated to every search.
         search_query = query
-        if len(query) <= 12 and (
-            reply_id or any(w in query for w in ("之前", "上次", "后来", "那个", "记得"))
+        if len(query) <= 40 and (
+            reply_id
+            or any(w in query for w in ("之前", "上次", "后来", "那个", "记得", "他", "她", "这事"))
         ):
-            relevant = [
-                r for r in recent if r["sender_id"] == sender_id or r["platform_id"] == reply_id
-            ]
-            search_query += " " + " ".join(r["text"][:120] for r in relevant[-3:])
-        candidates = await self.store.call("search", scope, search_query)
+            if quoted:
+                search_query += " " + quoted["text"][:400]
+            elif conversation:
+                search_query += " " + " ".join(r["text"][:200] for r in conversation[-2:])
+            else:
+                relevant = [r for r in recent if r["sender_id"] == sender_id]
+                search_query += " " + " ".join(r["text"][:120] for r in relevant[-3:])
+        lexical = await self.store.call("search", scope, search_query)
+        semantic = []
         if self.vector and self.vector.enabled(cfg):
             try:
-                async with asyncio.timeout(min(0.8, cfg.online_timeout / 3)):
+                async with asyncio.timeout(min(2.5, cfg.online_timeout / 3)):
                     hits = await self.vector.search(cfg, scope, search_query)
-                    known = {m["id"] for m in candidates}
                     for hit in hits:
                         m = await self.store.call("detail", str(hit["id"]), scope)
-                        if (
-                            m
-                            and m["id"] not in known
-                            and m["version"] == hit.get("payload", {}).get("version")
-                        ):
-                            candidates.append(m)
-                            known.add(m["id"])
+                        if m and m["version"] == hit.get("payload", {}).get("version"):
+                            semantic.append(m)
             except Exception as exc:
                 result["vector_fallback"] = True
                 result["vector_error"] = failure_detail(exc)
         candidates = [
             m
-            for m in candidates
+            for m in merge_rankings(lexical, semantic)
             if m["status"] == "active"
             and m["expires"] > time.time()
             and m["summary"] not in visible
             and memory_marker(m["id"], m["version"]) not in visible
-        ][:12]
+        ]
         filtered = []
         for m in candidates:
             detail = await self.store.call("detail", m["id"], scope)
@@ -362,7 +376,16 @@ class Engine:
             ):
                 continue
             filtered.append(m)
-        candidates = filtered
+        candidates = filtered[:12]
+        result["retrieval"] = {
+            "lexical": len(lexical),
+            "semantic": len(semantic),
+            "eligible": len(filtered),
+            "reviewed_ids": [m["id"] for m in candidates],
+            "context_messages": len(conversation),
+            "has_quote": bool(quoted),
+            "expanded_query": search_query != query,
+        }
         if not candidates:
             result["reason"] = "没有合适的历史候选"
             return
@@ -374,6 +397,8 @@ class Engine:
                 "query": query,
                 "sender_id": sender_id,
                 "reply_id": reply_id,
+                "conversation": conversation,
+                "quoted_message": context_message(quoted) if quoted else None,
                 "recent": [context_message(r) for r in recent],
                 "candidates": [
                     {k: m[k] for k in ("id", "subject_id", "summary", "kind", "created")}
@@ -399,11 +424,17 @@ class Engine:
             result["stage"] = "原文核验"
             verification = await self.ask(
                 cfg,
-                "核验候选与来源是否一致且能回答本轮问题。只复述有逐字引用支持的限定信息；"
+                "核验候选与来源是否一致，且能为本轮回复提供具体相关的信息或背景，"
+                "不要求候选独立回答整句。提问者可能在问其他群友，不要混淆主体。"
+                "conversation 和 quoted_message 只帮助理解本轮话题，不能替代 messages 中的来源证据。"
+                "只复述有逐字引用支持的限定信息；"
                 "结合前后对话区分历史状态与现在、玩笑与现实；邻近消息可能是无关插话，不能拼接成事实。"
                 "时间带 +08:00 时区；采集时间不是精确发送时间。相关但来源不足 supported=false。返回支持表述的逐字 evidence。",
                 {
                     "query": query,
+                    "sender_id": sender_id,
+                    "conversation": conversation,
+                    "quoted_message": context_message(quoted) if quoted else None,
                     "subject_id": m["subject_id"],
                     "summary": m["summary"],
                     "messages": evidence,

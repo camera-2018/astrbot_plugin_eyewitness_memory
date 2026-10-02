@@ -171,7 +171,10 @@ class EyewitnessMemoryPlugin(Star):
             )
             budget, count_tokens = await request_budget(self.context, event, req)
             result = await self.engine.recall(
-                *args, budget=budget, count_injection_tokens=count_tokens
+                *args,
+                budget=budget,
+                count_injection_tokens=count_tokens,
+                conversation=req.contexts,
             )
             if result["mode"] == "active" and result["injection"]:
                 req.extra_user_content_parts.append(TextPart(text=result["injection"]))
