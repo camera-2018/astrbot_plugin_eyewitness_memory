@@ -47,9 +47,16 @@ test("AstrBot bridge, source inspection, edit, preview and settings without toke
   await page.getByRole("button", { name: "开始试召回" }).click();
   await expect(page.getByRole("heading", { name: "拟注入内容" })).toBeVisible();
   await page.getByRole("button", { name: "召回记录", exact: true }).click();
+  await expect(page.getByLabel("召回记录类型")).toHaveValue("active");
+  await expect(page.getByText("小林之前说的绘画比赛计划是什么", { exact: true })).toHaveCount(0);
+  await page.getByLabel("召回记录类型").selectOption("preview");
   await expect(
     page.getByText("小林之前说的绘画比赛计划是什么", { exact: true }),
   ).toBeVisible();
+  await page.getByRole("button", { name: "记忆库", exact: true }).click();
+  const stats = page.locator("section").filter({hasText:"实聊召回 · 最近 24 小时"});
+  await expect(stats).toContainText("0 次检查 · 0 次注入");
+  await expect(stats).toContainText("手动测试单列：1 次测试，1 次通过");
   await page.getByRole("button", { name: "设置",exact:true }).click();
   const model = page.getByLabel("辅助模型 Provider ID", { exact: true });
   await expect(page.getByLabel("Qdrant API Key（可选）", { exact: true })).toHaveValue("");
@@ -161,4 +168,33 @@ test("disable and delete memory with explicit confirmation", async ({
     page.getByRole("heading", { name: "记忆与来源" }),
   ).not.toBeVisible();
   await expect(card).toHaveCount(0);
+});
+
+test("manual failed-batch retry requires confirmation and cannot be duplicated", async ({page}) => {
+  await page.goto("/");
+  await page.getByRole("button", {name:"失败提取", exact:true}).click();
+  await expect(page.getByRole("heading", {name:"失败提取批次"})).toBeVisible();
+  await expect(page.getByText("后台提取：上游 HTTP 429：额度不足或已耗尽", {exact:true}).last()).toBeVisible();
+  const batch = await page.evaluate(async () => {
+    const result = await window.AstrBotPluginPage!.apiPost("api", {path:"failed-batches"}) as {items:{id:string;attempted_at:number}[]};
+    return result.items[0];
+  });
+  page.once("dialog", d => d.dismiss());
+  await page.getByRole("button", {name:"重新提取", exact:true}).click();
+  await expect(page.getByText("1 条原文", {exact:true})).toBeVisible();
+  await page.screenshot({path:"test-results/failed-batches.png", fullPage:true});
+  page.once("dialog", d => d.accept());
+  await page.getByRole("button", {name:"重新提取", exact:true}).click();
+  await expect(page.getByRole("status")).toContainText("1 条原文已重新入队");
+  await expect(page.getByText("没有失败批次。", {exact:true})).toBeVisible();
+  const duplicate = await page.evaluate(async (batch) => {
+    try {
+      await window.AstrBotPluginPage!.apiPost("api", {path:`failed-batches/${batch.id}/retry`,method:"POST",body:{confirm:"RETRY",attempted_at:batch.attempted_at}});
+      return "incorrectly accepted";
+    } catch (e) { return (e as Error).message; }
+  }, batch);
+  expect(duplicate).toContain("状态已变化");
+  await page.reload();
+  await page.getByRole("button", {name:"失败提取", exact:true}).click();
+  await expect(page.getByText("没有失败批次。", {exact:true})).toBeVisible();
 });

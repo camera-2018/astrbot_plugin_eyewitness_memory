@@ -65,6 +65,7 @@ async def request_budget(context, event, req) -> tuple[InjectionBudget, Callable
     )
     from astrbot.core.agent.message import (
         AudioURLPart,
+        ContentPart,
         ImageURLPart,
         Message,
         TextPart,
@@ -76,16 +77,6 @@ async def request_budget(context, event, req) -> tuple[InjectionBudget, Callable
     def text_cost(value: str) -> int:
         native = counter.count_tokens([Message(role="user", content=value)])
         return max(math.ceil(native * 1.5), len(value))
-
-    if req.image_urls or req.audio_urls or req.tool_calls_result:
-        return unavailable("本轮含媒体或工具结果，无法安全估算"), text_cost
-    for part in req.extra_user_content_parts or []:
-        if not isinstance(part, TextPart) and not (
-            isinstance(part, dict)
-            and part.get("type") == "text"
-            and isinstance(part.get("text"), str)
-        ):
-            return unavailable("本轮附加内容含非文本，无法安全估算"), text_cost
 
     try:
         selected_id = event.get_extra("selected_provider") if hasattr(event, "get_extra") else None
@@ -119,9 +110,19 @@ async def request_budget(context, event, req) -> tuple[InjectionBudget, Callable
         if req.prompt:
             content.append(TextPart(text=req.prompt))
         for part in req.extra_user_content_parts or []:
-            content.append(TextPart(text=part["text"]) if isinstance(part, dict) else part)
+            content.append(ContentPart.model_validate(part) if isinstance(part, dict) else part)
+        # Count media by type without opening files, fetching URLs or copying base64.
+        for _ in req.image_urls or []:
+            content.append(ImageURLPart(image_url={"url": "budget-image"}))
+        for _ in req.audio_urls or []:
+            content.append(AudioURLPart(audio_url={"url": "budget-audio"}))
         if content:
             messages.append(Message(role="user", content=content))
+        results = req.tool_calls_result or []
+        if not isinstance(results, list):
+            results = [results]
+        for result in results:
+            messages.extend(Message.model_validate(raw) for raw in result.to_openai_messages())
 
         native_tokens = counter.count_tokens(messages)
         text_chars = 0

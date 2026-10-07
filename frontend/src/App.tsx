@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
   type FormEvent,
   type ReactNode,
@@ -42,12 +43,14 @@ import {
   type Settings,
   type Trace,
   type Recall,
+  type FailedBatch,
 } from "@/lib/api";
 
-type Page = "memories" | "traces" | "preview" | "settings";
+type Page = "memories" | "traces" | "failures" | "preview" | "settings";
 const navigation: { id: Page; label: string; icon: typeof BookOpen }[] = [
   { id: "memories", label: "记忆库", icon: BookOpen },
   { id: "traces", label: "召回记录", icon: Clock3 },
+  { id: "failures", label: "失败提取", icon: Archive },
   { id: "preview", label: "召回测试", icon: FlaskConical },
   { id: "settings", label: "设置", icon: Settings2 },
 ];
@@ -108,7 +111,7 @@ export default function App() {
     void refresh();
     const t = setInterval(() => void refresh(), 15000);
     return () => clearInterval(t);
-  }, [refresh]);
+  }, [refresh, page]);
   return (
     <div className="shell">
       <main className="main">
@@ -163,6 +166,19 @@ export default function App() {
         {overview?.last_error && (
           <div className="notice mt-5">最近后台状态：{overview.last_error}</div>
         )}
+        {overview?.recall_24h && page === "memories" && (
+          <section className="memory-card mt-5 space-y-2">
+            <h2 className="font-medium">实聊召回 · 最近 24 小时</h2>
+            <p className="text-sm">
+              {overview.recall_24h.real.calls} 次检查 · {overview.recall_24h.real.injected} 次注入
+              {overview.recall_24h.real.calls > 0 && ` · ${(100 * overview.recall_24h.real.injected / overview.recall_24h.real.calls).toFixed(1)}%`}
+            </p>
+            <p className="subtle text-xs">
+              手动测试单列：{overview.recall_24h.preview.calls} 次测试，{overview.recall_24h.preview.injected} 次通过。
+              统计全部启用群的回复检查，仅覆盖保留的记录；注入不代表最终回答一定采用。
+            </p>
+          </section>
+        )}
         {overview && page === "memories" && !!overview.llm_usage_24h?.length && (
           <section className="memory-card mt-5 space-y-2">
             <h2 className="font-medium">辅助模型 · 最近 24 小时</h2>
@@ -180,6 +196,7 @@ export default function App() {
         {!!overview?.extraction_failed_messages && (
           <div className="notice mt-5">
             提取失败原文：{overview.extraction_failed_messages} 条，已保留，不会自动重试，不阻塞后续批次。
+            <Button variant="outline" size="sm" className="ml-3" onClick={() => setPage("failures")}>查看失败批次</Button>
             {overview.last_extraction_failure && (
               <div className="mt-1">
                 最近失败：{date(overview.last_extraction_failure.created)} · {overview.last_extraction_failure.scope}
@@ -213,6 +230,7 @@ export default function App() {
         )}
         {page === "memories" && <Memories scope={scope} refresh={refresh} />}
         {page === "traces" && <Traces scope={scope} />}
+        {page === "failures" && <FailedBatches scope={scope} refresh={refresh} />}
         {page === "preview" && <Preview scope={scope} />}
         {page === "settings" && <SettingsPage refresh={refresh} />}
         <div className="mt-10 pt-5 border-t subtle text-xs flex flex-wrap justify-between gap-3">
@@ -567,18 +585,27 @@ function RecallResult({ result }: { result: Recall }) {
 }
 function Traces({ scope }: { scope: string }) {
   const [items, setItems] = useState<Trace[]>([]),
+    [mode, setMode] = useState("active"),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(true);
   useEffect(() => {
+    let current = true;
     setBusy(true);
-    api<Trace[]>(`traces?${new URLSearchParams({ scope })}`)
-      .then(setItems)
-      .catch((e) => setError(e.message))
-      .finally(() => setBusy(false));
-  }, [scope]);
+    setError("");
+    api<Trace[]>(`traces?${new URLSearchParams({ scope, mode })}`)
+      .then((rows) => { if (current) setItems(rows); })
+      .catch((e) => { if (current) setError(e.message); })
+      .finally(() => { if (current) setBusy(false); });
+    return () => { current = false; };
+  }, [scope, mode]);
   return (
     <>
       <ErrorNotice error={error} />
+      <select className="scope-select mb-4" aria-label="召回记录类型" value={mode} onChange={(e) => setMode(e.target.value)}>
+        <option value="active">实聊召回</option>
+        <option value="preview">手动测试</option>
+        <option value="">全部记录</option>
+      </select>
       {busy ? (
         <Empty>正在加载记录…</Empty>
       ) : !items.length ? (
@@ -589,7 +616,7 @@ function Traces({ scope }: { scope: string }) {
             <details className="memory-card" key={t.id}>
               <summary className="cursor-pointer">
                 <div className="inline-flex gap-3 items-center">
-                  <Tag value={t.mode} />
+                  <Badge variant="secondary">{t.mode === "preview" ? "手动测试" : "实聊召回"}</Badge>
                   <span>{t.query || "空消息"}</span>
                 </div>
                 <p className="subtle mt-2">
@@ -605,6 +632,70 @@ function Traces({ scope }: { scope: string }) {
       )}
     </>
   );
+}
+function FailedBatches({ scope, refresh }: { scope: string; refresh: () => Promise<void> }) {
+  const [items, setItems] = useState<FailedBatch[]>([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [loading, setLoading] = useState(true);
+  const requestId = useRef(0);
+  const viewScope = useRef(scope);
+  viewScope.current = scope;
+  const load = useCallback(async (next = 0) => {
+    if (viewScope.current !== scope) return;
+    const id = ++requestId.current;
+    setLoading(true); setError(""); setItems([]);
+    try {
+      const data = await api<{ items: FailedBatch[]; total: number }>(`failed-batches?${new URLSearchParams({ scope, offset: String(next) })}`);
+      if (requestId.current !== id || viewScope.current !== scope) return;
+      setItems(data.items); setTotal(data.total); setOffset(next); setError("");
+    } catch (e) { if (requestId.current === id) setError((e as Error).message); }
+    finally { if (requestId.current === id) setLoading(false); }
+  }, [scope]);
+  useEffect(() => {
+    setNotice(""); void load();
+    return () => { requestId.current += 1; };
+  }, [load]);
+  async function retry(batch: FailedBatch) {
+    if (!window.confirm(`重新提取这个批次的 ${batch.messages} 条原文？这会调用辅助模型，可能产生费用。请先确认上游已恢复。`)) return;
+    setBusy(batch.id); setNotice("");
+    try {
+      const data = await api<{ queued: number }>(`failed-batches/${batch.id}/retry`, {
+        method: "POST", body: JSON.stringify({ confirm: "RETRY", attempted_at: batch.attempted_at }),
+      });
+      await load(offset); await refresh();
+      setNotice(`${data.queued} 条原文已重新入队，后台按正常批大小提取；再次失败不会自动重试。`);
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(""); }
+  }
+  return <>
+    <h2 className="font-medium mb-2">失败提取批次</h2>
+    <p className="subtle mb-4">原文仍按保留周期保存。上游恢复后可手动重新入队；一次点击只处理选中的批次。</p>
+    <ErrorNotice error={error} />
+    {notice && <p role="status" className="notice mb-4">{notice}</p>}
+    {loading ? <Empty>正在加载失败批次…</Empty> : !items.length ? <Empty>没有失败批次。</Empty> : <div className="space-y-3">
+      {items.map((batch) => <div className="memory-card" key={batch.id}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <span className="font-medium">{batch.messages} 条原文</span>
+          <Button variant="outline" size="sm" disabled={!!busy || !batch.can_retry} onClick={() => void retry(batch)}>
+            {busy === batch.id ? "重新入队中…" : "重新提取"}
+          </Button>
+        </div>
+        <p className="subtle mt-2 break-all">{batch.scope} · {batch.attempted_at ? date(batch.attempted_at) : "尝试时间未知"}</p>
+        <p className="text-sm mt-2">{batch.reason}</p>
+        <p className="subtle mt-2">原文时间：{date(batch.first_message)} — {date(batch.last_message)}</p>
+        {!batch.can_retry && <p className="subtle mt-2">需启用该群并配置辅助模型；没有尝试时间的旧批次无法安全重提。</p>}
+      </div>)}
+    </div>}
+    <div className="flex items-center gap-3 mt-4">
+      <Button variant="outline" size="sm" disabled={offset === 0 || !!busy || loading} onClick={() => void load(Math.max(0, offset - 30))}>上一页</Button>
+      <span className="subtle">共 {total} 个批次</span>
+      <Button variant="outline" size="sm" disabled={offset + 30 >= total || !!busy || loading} onClick={() => void load(offset + 30)}>下一页</Button>
+    </div>
+  </>;
 }
 function Preview({ scope }: { scope: string }) {
   const [query, setQuery] = useState(""),

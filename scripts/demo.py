@@ -59,6 +59,15 @@ async def run(port: int):
             "你说的是十月的那场比赛吗？",
             sent_at=time.time(),
         )
+        # A failed batch for the manual-requeue UI; no worker or real API is started.
+        failed_id = await store.call(
+            "capture", scope, "failed-demo", "demo-alice", "小林", "我计划下个月参加绘画活动"
+        )
+        failed_rows = await store.call("source_rows", scope, [failed_id])
+        await store.call("claim_extraction", failed_rows)
+        await store.call(
+            "fail_extraction", failed_rows, "后台提取：上游 HTTP 429：额度不足或已耗尽"
+        )
 
         async def generate(provider, system, prompt):
             data = json.loads(prompt)["data"]

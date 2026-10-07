@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from copy import deepcopy
 
-from .models import safe_text, terms
+from .models import low_signal, safe_text, terms
 
 # These words indicate a conversational request, not a concrete remembered topic.
 GENERIC_TERMS = set(
@@ -20,6 +20,28 @@ GENERIC_TERMS = set(
 HISTORY_REFERENCE = re.compile(
     r"之前|以前|上次|记得|记忆|历史|习惯|偏好|原来|那[个次台份]|照旧|平时|曾经"
 )
+FOLLOWUP = re.compile(
+    r"^(?:教我|教教我|教一下|怎么弄|怎么做|怎么学|咋弄|咋办|那怎么办|"
+    r"细说|讲讲|说说看|详细说说|展开说说|继续|然后呢|我也想学)$"
+)
+
+
+def needs_topic_context(query: str) -> bool:
+    plain = re.sub(r"[\s，,。.!！?？~～…、]+", "", query)
+    return bool(FOLLOWUP.fullmatch(plain))
+
+
+def followup_topic(conversation: list[dict]) -> str:
+    """Use the latest conversation topic, never an unrelated group interjection."""
+    for row in reversed(conversation):
+        text = row["text"][:400]
+        if needs_topic_context(text) or not (set(terms(text)) - GENERIC_TERMS):
+            continue
+        if not low_signal(text):
+            return text
+    return ""
+
+
 DIRECT_OPERATION = re.compile(
     r"(?:^|[，,。\s]|帮我|给我)(?:请)?(?:打开|关闭|开启|关掉|暂停|播放|重启|停止|执行|运行|"
     r"安装|卸载|删除|翻译|朗读|设闹钟|设置闹钟|调到|调成)"

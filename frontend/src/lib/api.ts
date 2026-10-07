@@ -64,6 +64,11 @@ export type Overview = {
     usage_known: number; input_tokens: number | null; output_tokens: number | null;
     avg_input_tokens: number | null; avg_elapsed_ms: number | null;
   }[];
+  recall_24h: {
+    window_hours: number;
+    real: { calls: number; injected: number };
+    preview: { calls: number; injected: number };
+  };
   extraction_failed_messages: number;
   last_extraction_failure: { scope: string; reason: string; created: number } | null;
   disk_bytes: number;
@@ -117,6 +122,16 @@ export type Trace = {
   elapsed_ms: number;
   created: number;
 };
+export type FailedBatch = {
+  id: string;
+  scope: string;
+  attempted_at: number | null;
+  messages: number;
+  first_message: number;
+  last_message: number;
+  reason: string;
+  can_retry: boolean;
+};
 export const date = (value: number) =>
   new Date(value * 1000).toLocaleString("zh-CN", { hour12: false });
 export const labels: Record<string, string> = {
@@ -134,4 +149,5 @@ export const labels: Record<string, string> = {
   accept: "相关",
   reject: "不相关",
   needs_source: "需查原文",
+  preview: "手动测试",
 };

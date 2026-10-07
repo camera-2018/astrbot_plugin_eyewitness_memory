@@ -209,3 +209,79 @@ async def test_idle_worker_does_not_erase_extraction_error(store):
         assert engine.last_error == "提取失败：模型返回空内容"
     finally:
         await engine.close()
+
+
+async def test_manual_retry_is_once_scoped_and_protects_against_stale_clicks(store):
+    first = await pending(store)
+    foreign = await pending(store, scope=OTHER)
+    cfg = await store.call("get_settings")
+    calls = 0
+
+    async def generate(*args):
+        nonlocal calls
+        calls += 1
+        return ""
+
+    engine = Engine(store, generate)
+    for _ in range(2):
+        with pytest.raises(AuxiliaryModelFailure):
+            await engine.extract_once(cfg)
+    assert calls == 2
+    api = AdminAPI(store, engine)
+    data, status = await api.handle({"path": "failed-batches?scope=" + SCOPE})
+    assert status == 200 and data["total"] == 1
+    batch = data["items"][0]
+    operation = {
+        "path": f"failed-batches/{batch['id']}/retry",
+        "method": "POST",
+        "body": {"confirm": "RETRY", "attempted_at": batch["attempted_at"]},
+    }
+    assert (await api.handle({**operation, "body": {}}))[1] == 400
+    result, status = await api.handle(operation)
+    assert status == 200 and result["queued"] == 1 and calls == 2
+    assert (await store.call("source_rows", OTHER, [foreign]))[0]["processed"] == 3
+    assert (await api.handle(operation))[1] == 409
+    with pytest.raises(AuxiliaryModelFailure):
+        await engine.extract_once(cfg)
+    assert calls == 3
+    assert (await api.handle(operation))[1] == 409
+    assert not await engine.extract_once(cfg)
+    assert (await store.call("source_rows", SCOPE, [first]))[0]["processed"] == 3
+
+
+async def test_manual_retry_cannot_recreate_privacy_deleted_data_or_use_disabled_scope(store):
+    source = await pending(store)
+    batch = await store.call("source_rows", SCOPE, [source])
+    await store.call("claim_extraction", batch)
+    await store.call("fail_extraction", batch, "请求超时")
+    failed = (await store.call("failed_batches"))["items"][0]
+    api = AdminAPI(store, Engine(store, lambda *_: None))
+    op = {
+        "path": f"failed-batches/{failed['id']}/retry",
+        "method": "POST",
+        "body": {"confirm": "RETRY", "attempted_at": failed["attempted_at"]},
+    }
+    cfg = await store.call("get_settings")
+    await store.call("save_settings", cfg.model_copy(update={"allowed_scopes": [OTHER]}))
+    assert (await api.handle(op))[1] == 409
+    await store.call("erase_subject", SCOPE, "alice")
+    assert (await api.handle(op))[1] == 409
+    assert not await store.call("source_rows", SCOPE, [source])
+
+
+async def test_background_error_uses_injected_plugin_reporter(store):
+    await pending(store)
+    reported = []
+
+    async def generate(*args):
+        return ""
+
+    engine = Engine(store, generate, report=reported.append)
+    await engine.start()
+    try:
+        async with asyncio.timeout(2):
+            while not engine.last_cycle:
+                await asyncio.sleep(0.01)
+        assert len(reported) == 1 and "提取失败" in reported[0]
+    finally:
+        await engine.close()

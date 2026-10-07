@@ -186,8 +186,62 @@ async def check():
             assert light.tool_schema_mode == "skills_like"
             assert light.estimated_tools < full.estimated_tools
             assert schema_req.func_tool is tools
+            plain, _ = await request_budget(plugin.context, Event(), ProviderRequest(prompt="查找"))
+            for field, allowance in (("image_urls", 2300), ("audio_urls", 1500)):
+                # Nonexistent files prove budgeting does not load media or fetch URLs.
+                media_req = ProviderRequest(prompt="查找", **{field: ["/does-not-exist"]})
+                before = copy.deepcopy(media_req)
+                media, _ = await request_budget(plugin.context, Event(), media_req)
+                assert media.available > 0 and not media.reason
+                assert media.estimated_input >= plain.estimated_input + allowance
+                assert media_req == before
+            extra_req = ProviderRequest(
+                prompt="查找",
+                extra_user_content_parts=[
+                    {"type": "image_url", "image_url": {"url": "/does-not-exist"}}
+                ],
+            )
+            extra, _ = await request_budget(plugin.context, Event(), extra_req)
+            assert extra.available > 0 and extra.estimated_input > plain.estimated_input
+
+            from astrbot.core.agent.message import AssistantMessageSegment, ToolCallMessageSegment
+            from astrbot.core.provider.entities import ToolCallsResult
+
+            result = ToolCallsResult(
+                tool_calls_info=AssistantMessageSegment(
+                    tool_calls=[
+                        {
+                            "id": "call-test",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": '{"query":"test"}'},
+                        }
+                    ]
+                ),
+                tool_calls_result=[
+                    ToolCallMessageSegment(tool_call_id="call-test", content="检索结果" * 50)
+                ],
+            )
+            for results in (result, [result]):
+                result_req = ProviderRequest(prompt="查找", tool_calls_result=results)
+                before = copy.deepcopy(result_req)
+                tool_result, _ = await request_budget(plugin.context, Event(), result_req)
+                assert tool_result.available > 0
+                assert tool_result.estimated_input > plain.estimated_input
+                assert result_req == before
+            result.tool_calls_result[0].content = "过长的检索结果" * 3000
+            too_large, _ = await request_budget(
+                plugin.context, Event(), ProviderRequest(prompt="查找", tool_calls_result=result)
+            )
+            assert too_large.available == 0 and "上下文预算" in too_large.reason
+            unknown, _ = await request_budget(
+                plugin.context,
+                Event(),
+                ProviderRequest(extra_user_content_parts=[{"type": "unknown"}]),
+            )
+            assert unknown.available == 0 and "无法安全估算" in unknown.reason
             print(
-                "PASS: raw timestamp, light tool budget, persistent user-tail append, unchanged system/history"
+                "PASS: media/tool-result budget without I/O, overflow/unknown fail closed; "
+                "raw timestamp, light tool budget, persistent user-tail append, unchanged system/history"
             )
             cfg.mode = "off"
             await plugin.store.call("save_settings", cfg)

@@ -35,3 +35,26 @@ def test_diagnostic_classifies_sqlite_error_without_query():
         db.execute("SELECT secret FROM missing_table")
     assert failure_detail(caught.value) == "SQLite SQLITE_ERROR"
     db.close()
+
+
+@pytest.mark.parametrize(
+    "body,category",
+    [
+        ({"error": {"code": "insufficient_quota", "message": "sk-private-credential"}}, "额度"),
+        (
+            {"error": {"message": "Individual quota reached. Please upgrade your subscription"}},
+            "额度",
+        ),
+        ({"error": {"type": "rate_limit_exceeded"}}, "速率"),
+        ({"error": {"code": "model_cooldown"}}, "冷却"),
+        ({"error": {"message": "sk-private-credential arbitrary-private-message"}}, "HTTP 429"),
+    ],
+)
+def test_http_error_classification_does_not_echo_credentials_or_response_text(body, category):
+    class Error(Exception):
+        status_code = 429
+
+    exc = Error("raw-private-exception")
+    exc.body = body
+    detail = failure_detail(exc)
+    assert category in detail and "private" not in detail and "sk-" not in detail

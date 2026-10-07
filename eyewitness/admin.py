@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from pydantic import ValidationError
 
+from .errors import RetryConflict
 from .models import Settings
 
 
@@ -23,6 +24,8 @@ class AdminAPI:
             return data, 200
         except ValidationError:
             return {"error": "配置格式或取值不合法，请检查字段"}, 400
+        except RetryConflict as exc:
+            return {"error": str(exc)}, 409
         except (ValueError, KeyError, TypeError):
             return {"error": "请求无效或数据版本冲突，请检查并刷新"}, 400
         except LookupError:
@@ -47,7 +50,7 @@ class AdminAPI:
                 "last_error": engine.last_error,
                 "last_cycle": engine.last_cycle,
                 "scopes": await store.call("list_scopes"),
-                "version": "0.1.16",
+                "version": "0.1.17",
             }
         if route == "providers" and method == "GET":
             return await self.providers() if self.providers else {"chat": [], "embedding": []}
@@ -90,7 +93,19 @@ class AdminAPI:
             result["context"] = await store.call("source_context", mid, result["scope"])
             return result
         if route == "traces" and method == "GET":
-            return await store.call("traces", q.get("scope", ""))
+            return await store.call("traces", q.get("scope", ""), q.get("mode", ""))
+        if route == "failed-batches" and method == "GET":
+            return await store.call(
+                "failed_batches", q.get("scope", ""), max(0, min(100000, int(q.get("offset", 0))))
+            )
+        if re.fullmatch(r"failed-batches/[a-fA-F0-9-]{36}/retry", route) and method == "POST":
+            if body.get("confirm") != "RETRY":
+                raise ValueError("Confirmation required")
+            result = await store.call(
+                "retry_failed_batch", route.split("/")[1], body.get("attempted_at")
+            )
+            engine.report(f"手动重提：群 {result['scope']} 共 {result['queued']} 条原文重新入队")
+            return result
         if route == "preview" and method == "POST":
             if not body.get("query") or not all(
                 isinstance(body.get(k, ""), str) for k in ("scope", "query", "sender_id")

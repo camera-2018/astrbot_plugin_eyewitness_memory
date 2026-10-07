@@ -33,7 +33,9 @@ from .retrieval import (
     compact_review,
     conversation_hint,
     direct_operation,
+    followup_topic,
     merge_rankings,
+    needs_topic_context,
     rank_candidates,
 )
 from .store import Store
@@ -69,10 +71,11 @@ REVIEW_INSTRUCTION = (
 
 
 class Engine:
-    def __init__(self, store: Store, generate, vector: VectorIndex | None = None):
+    def __init__(self, store: Store, generate, vector: VectorIndex | None = None, report=None):
         self.store = store
         self.generate = generate
         self.vector = vector
+        self.report = report or (lambda message: log.warning("Eyewitness Memory %s", message))
         self.online = asyncio.Semaphore(2)
         self.worker_task: asyncio.Task | None = None
         self.last_error = ""
@@ -202,7 +205,7 @@ class Engine:
             except Exception as exc:
                 failed = True
                 self.last_error = "向量索引暂不可用：" + failure_detail(exc)
-                log.warning("Eyewitness Memory %s", self.last_error)
+                self.report(self.last_error)
                 await self.store.call("index_failed", mid, job["attempts"])
         if indexed and not failed and self.last_error.startswith("向量索引暂不可用："):
             self.last_error = ""
@@ -218,7 +221,7 @@ class Engine:
                             completed = await self.extract_once(cfg)
                         except Exception as exc:
                             self.last_error = "提取失败：" + failure_detail(exc)
-                            log.warning("Eyewitness Memory %s", self.last_error)
+                            self.report(self.last_error)
                         else:
                             if completed and self.last_error.startswith("提取失败："):
                                 self.last_error = ""
@@ -226,7 +229,7 @@ class Engine:
                 self.last_cycle = time.time()
             except Exception as exc:
                 self.last_error = "后台任务异常：" + failure_detail(exc)
-                log.warning("Eyewitness Memory worker: %s", self.last_error)
+                self.report(self.last_error)
             await asyncio.sleep(30)
 
     async def recall(
@@ -282,8 +285,10 @@ class Engine:
                         )
             except TimeoutError:
                 result["reason"] = result["stage"] + "达到记忆时间预算，未完成核验的候选不注入"
+                self.report(result["reason"])
             except Exception as exc:
                 result["reason"] = "记忆流程降级：" + failure_detail(exc)
+                self.report(result["reason"])
         # Recheck active state after awaits; deleted/edited/expired memories cannot escape here.
         current = await self.store.call("get_settings")
         if current.mode == "off" or scope not in current.allowed_scopes:
@@ -390,7 +395,14 @@ class Engine:
         quoted = await self.store.call("referenced_message", scope, reply_id) if reply_id else None
         # Context assists pronoun resolution; it is not blindly concatenated to every search.
         search_query = query
-        if len(query) <= 40 and (
+        if needs_topic_context(query):
+            topic = quoted["text"][:400] if quoted else followup_topic(conversation)
+            if not topic:
+                result["reason"] = "短消息缺少明确话题，跳过长期记忆"
+                result["retrieval"] = {"reviewed_ids": [], "intent_skip": True}
+                return
+            search_query += " " + topic
+        elif len(query) <= 40 and (
             reply_id
             or any(w in query for w in ("之前", "上次", "后来", "那个", "记得", "他", "她", "这事"))
         ):

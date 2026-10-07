@@ -12,6 +12,74 @@ class AuxiliaryModelFailure(Exception):
     """A safe-to-display explanation of one auxiliary model failure."""
 
 
+class RetryConflict(ValueError):
+    """A manual retry refers to an outdated or unavailable failed batch."""
+
+
+def upstream_category(exc: Exception) -> str:
+    """Classify only known structured fields; never display provider response text."""
+    fragments = []
+
+    def collect(value, depth=0):
+        if depth > 4:
+            return
+        if isinstance(value, dict):
+            for key, item in list(value.items())[:20]:
+                if key in {"message", "code", "type", "status"} and isinstance(item, str):
+                    fragments.append(item[:2000].lower())
+                elif isinstance(item, (dict, list)):
+                    collect(item, depth + 1)
+        elif isinstance(value, list):
+            for item in value[:6]:
+                collect(item, depth + 1)
+
+    collect(getattr(exc, "body", None))
+    text = " ".join(fragments)
+    if any(
+        word in text
+        for word in (
+            "insufficient_quota",
+            "quota reached",
+            "quota exhausted",
+            "credit",
+            "balance",
+            "billing",
+            "daily limit",
+            "subscription limit",
+            "额度",
+            "余额",
+            "配额耗尽",
+        )
+    ):
+        return "额度不足或已耗尽"
+    if any(
+        word in text
+        for word in (
+            "rate_limit",
+            "rate limit",
+            "too many requests",
+            "per minute",
+            "rpm",
+            "tpm",
+            "限流",
+            "频率",
+        )
+    ):
+        return "请求频率或 Token 速率受限"
+    if any(
+        word in text
+        for word in (
+            "model_cooldown",
+            "cooling down",
+            "no_available_channels",
+            "all channels unavailable",
+            "冷却",
+        )
+    ):
+        return "模型或渠道冷却中，暂不可用"
+    return ""
+
+
 def failure_detail(exc: Exception) -> str:
     if isinstance(exc, AuxiliaryModelFailure):
         return str(exc)
@@ -35,7 +103,10 @@ def failure_detail(exc: Exception) -> str:
     for name in ("status_code", "status"):
         status = getattr(exc, name, None)
         if type(status) is int and 400 <= status <= 599:
-            return f"上游 HTTP {status}"
+            category = upstream_category(exc)
+            return f"上游 HTTP {status}" + ("：" + category if category else "")
+    if type(exc).__name__ == "EmptyModelOutputError":
+        return "模型返回空内容（EmptyModelOutputError）"
     if isinstance(exc, sqlite3.Error):
         return "SQLite " + str(getattr(exc, "sqlite_errorname", type(exc).__name__))[:48]
     if isinstance(exc, ValueError):

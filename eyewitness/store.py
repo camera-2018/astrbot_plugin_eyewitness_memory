@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import sqlite3
 import time
 import uuid
@@ -11,7 +12,7 @@ from typing import Any
 
 from .config import ConfigSettings, settings_revision
 from .context import bounded_context, context_message, message_order, message_time, platform_time
-from .errors import AuxiliaryModelFailure
+from .errors import AuxiliaryModelFailure, RetryConflict
 from .models import Candidate, Settings, extraction_noise, safe_text, terms
 
 
@@ -332,6 +333,64 @@ class Store:
                 "WHERE scope=? AND id=? AND processed=4",
                 [(safe_text(reason, 500), r["scope"], r["id"]) for r in batch],
             )
+
+    def failed_batches(self, scope: str = "", offset: int = 0):
+        cfg = self.get_settings()
+        where = "processed=3 AND (?='' OR scope=?)"
+        grouped = " FROM messages WHERE " + where + " GROUP BY scope,extraction_attempted_at"
+        total = self.db.execute(
+            "SELECT count(*) FROM (SELECT 1" + grouped + ")", (scope, scope)
+        ).fetchone()[0]
+        rows = self.db.execute(
+            "SELECT min(id) id,scope,extraction_attempted_at attempted_at,count(*) messages,"
+            "min(created) first_message,max(created) last_message,max(extraction_error) reason"
+            + grouped
+            + " ORDER BY extraction_attempted_at DESC LIMIT 30 OFFSET ?",
+            (scope, scope, max(0, offset)),
+        )
+        return {
+            "total": total,
+            "items": [
+                {
+                    **dict(row),
+                    "can_retry": bool(
+                        cfg.mode == "active"
+                        and cfg.provider_id
+                        and row["scope"] in cfg.allowed_scopes
+                        and row["attempted_at"] is not None
+                    ),
+                }
+                for row in rows
+            ],
+        }
+
+    def retry_failed_batch(self, anchor_id: str, attempted_at: float):
+        if (
+            type(attempted_at) not in (float, int)
+            or not math.isfinite(attempted_at)
+            or attempted_at <= 0
+        ):
+            raise ValueError("Invalid attempt timestamp")
+        cfg = self.get_settings()
+        with self.db:
+            row = self.db.execute(
+                "SELECT scope,processed,extraction_attempted_at FROM messages WHERE id=?",
+                (anchor_id,),
+            ).fetchone()
+            if not row or row["processed"] != 3 or row["extraction_attempted_at"] != attempted_at:
+                raise RetryConflict("该失败批次已被重提、删除或状态已变化，请刷新")
+            if (
+                cfg.mode != "active"
+                or not cfg.provider_id
+                or row["scope"] not in cfg.allowed_scopes
+            ):
+                raise RetryConflict("请先启用该群记录并配置辅助模型")
+            cursor = self.db.execute(
+                "UPDATE messages SET processed=0,extraction_error='',extraction_attempted_at=NULL "
+                "WHERE processed=3 AND scope=? AND extraction_attempted_at=?",
+                (row["scope"], attempted_at),
+            )
+        return {"queued": cursor.rowcount, "scope": row["scope"]}
 
     def source_rows(self, scope: str, ids: list[str]):
         if not ids:
@@ -659,12 +718,31 @@ class Store:
             )
         return tid
 
-    def traces(self, scope: str = ""):
+    def traces(self, scope: str = "", mode: str = ""):
+        if mode not in ("", "active", "preview"):
+            raise ValueError("Invalid trace mode")
         rows = self.db.execute(
-            "SELECT * FROM traces WHERE (?='' OR scope=?) ORDER BY created DESC LIMIT 100",
-            (scope, scope),
+            "SELECT * FROM traces WHERE (?='' OR scope=?) AND (?='' OR mode=?) ORDER BY created DESC LIMIT 100",
+            (scope, scope, mode, mode),
         )
         return [{**dict(r), "data": json.loads(r["data"])} for r in rows]
+
+    def recall_stats(self, scope: str = ""):
+        result = {
+            "window_hours": 24,
+            "real": {"calls": 0, "injected": 0},
+            "preview": {"calls": 0, "injected": 0},
+        }
+        for row in self.db.execute(
+            "SELECT mode,count(*) calls,sum(length(json_extract(data,'$.injection'))>0) injected "
+            "FROM traces WHERE created>=? AND (?='' OR scope=?) AND mode IN ('active','preview') GROUP BY mode",
+            (time.time() - 86400, scope, scope),
+        ):
+            result["real" if row["mode"] == "active" else "preview"] = {
+                "calls": row["calls"],
+                "injected": row["injected"] or 0,
+            }
+        return result
 
     def index_jobs(self):
         return [
@@ -728,6 +806,7 @@ class Store:
             "index_queue": self.db.execute("SELECT count(*) FROM outbox").fetchone()[0],
             "calls_today": row[0] if row else 0,
             "llm_usage_24h": self.usage_stats(),
+            "recall_24h": self.recall_stats(),
             "extraction_failed_messages": self.db.execute(
                 "SELECT count(*) FROM messages WHERE processed=3"
             ).fetchone()[0],

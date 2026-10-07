@@ -53,3 +53,24 @@ async def test_memory_detail_includes_context_before_and_after_edit(store):
         assert status == 200 and len(data["context"]) == 2
         assert len([r for r in data["context"] if r["is_source"]]) == 1
         assert all(r["time"].endswith("+08:00") for r in data["context"])
+
+
+async def test_preview_is_separate_from_real_recall_stats_and_trace_filter(store):
+    from tests.test_engine import Model, answers
+
+    target, source = await seed(store)
+    engine = Engine(store, Model(answers(target, source)))
+    await engine.recall(SCOPE, "绘画比赛", preview=True)
+    api = AdminAPI(store, engine)
+    overview, status = await api.handle({"path": "overview"})
+    assert status == 200
+    assert overview["recall_24h"]["real"] == {"calls": 0, "injected": 0}
+    assert overview["recall_24h"]["preview"] == {"calls": 1, "injected": 1}
+    await engine.recall(SCOPE, "哭哭")
+    overview, _ = await api.handle({"path": "overview"})
+    assert overview["recall_24h"]["real"] == {"calls": 1, "injected": 0}
+    real, _ = await api.handle({"path": "traces?mode=active"})
+    preview, _ = await api.handle({"path": "traces?mode=preview"})
+    assert len(real) == len(preview) == 1
+    assert real[0]["query"] == "哭哭" and preview[0]["mode"] == "preview"
+    assert (await api.handle({"path": "traces?mode=invalid"}))[1] == 400

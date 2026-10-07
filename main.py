@@ -35,6 +35,7 @@ class EyewitnessMemoryPlugin(Star):
             self.store,
             self.generate,
             VectorIndex(self.embed, lambda: self.config.get("qdrant_api_key", "")),
+            report=lambda message: logger.warning("群聊记忆 %s", message),
         )
         self.admin = AdminAPI(self.store, self.engine, self.providers)
         self.ready = False

@@ -30,6 +30,42 @@ async def test_only_generic_overlap_does_not_call_llm(store):
     assert "本地筛选" in result["reason"]
 
 
+@pytest.mark.parametrize("query", ["哭哭", "还真是", "，教我", "继续", "那怎么办"])
+async def test_reactions_and_topicless_followups_use_no_embedding_or_llm(store, query):
+    await seed(store)
+
+    class Vector:
+        def enabled(self, cfg):
+            return True
+
+        async def search(self, *args):
+            pytest.fail("A reaction or topicless followup must not contact embeddings")
+
+    model = Model([])
+    result = await Engine(store, model, Vector()).recall(SCOPE, query)
+    assert not result["injection"] and model.calls == 0
+
+
+async def test_short_followup_searches_current_topic_and_can_recall(store):
+    target, source = await seed(store)
+    model = Model(answers(target, source))
+    result = await Engine(store, model).recall(
+        SCOPE,
+        "，教我",
+        conversation=[{"role": "assistant", "content": "我们聊的是绘画比赛的准备。"}],
+    )
+    assert result["injection"] and model.calls == 1
+    assert result["retrieval"]["expanded_query"]
+
+
+async def test_followup_does_not_use_unrelated_group_recent_as_its_topic(store):
+    await seed(store)
+    await store.call("capture", SCOPE, "interjection", "bob", "Bob", "我在准备绘画比赛")
+    model = Model([])
+    result = await Engine(store, model).recall(SCOPE, "教我")
+    assert not result["injection"] and model.calls == 0
+
+
 @pytest.mark.parametrize(
     "query",
     ["打开电视", "睦头，把空调开到16度", "看看电视开了吗", "帮我打开浏览器", "把电视调到少儿频道"],

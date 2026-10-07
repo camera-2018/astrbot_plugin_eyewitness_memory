@@ -151,6 +151,14 @@ def low_signal(text: str, has_reference: bool = False) -> bool:
         "复读",
         "收到",
         "笑了",
+        "哭哭",
+        "还真是",
+        "呜呜",
+        "呜呜呜",
+        "难绷",
+        "666",
+        "何意味",
+        "好家伙",
     }
 
 
