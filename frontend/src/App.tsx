@@ -163,6 +163,20 @@ export default function App() {
         {overview?.last_error && (
           <div className="notice mt-5">最近后台状态：{overview.last_error}</div>
         )}
+        {overview && page === "memories" && !!overview.llm_usage_24h?.length && (
+          <section className="memory-card mt-5 space-y-2">
+            <h2 className="font-medium">辅助模型 · 最近 24 小时</h2>
+            {overview.llm_usage_24h.map((s) => (
+              <div key={s.stage} className="text-sm">
+                {s.stage}：{s.calls} 次 · 成功 {s.succeeded} · 失败/中断 {s.failed} · 进行中 {s.running}
+                <br />
+                平均输入 {s.avg_input_tokens === null ? "未知" : Math.round(s.avg_input_tokens).toLocaleString()} tokens
+                （{s.usage_known}/{s.calls} 次有用量） · 输入合计 {s.input_tokens === null ? "未知" : s.input_tokens.toLocaleString()}
+              </div>
+            ))}
+            <p className="subtle text-xs">只统计本插件的辅助模型轮次，不含主聊天、Embedding 或 SDK 内部重试；用量缺失不按 0 计算。旧版本调用无法补记。</p>
+          </section>
+        )}
         {!!overview?.extraction_failed_messages && (
           <div className="notice mt-5">
             提取失败原文：{overview.extraction_failed_messages} 条，已保留，不会自动重试，不阻塞后续批次。
@@ -900,8 +914,9 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
               [
                 ["online_timeout", "单次在线时间预算（秒）", 0.5, 30, 0.5],
                 ["extraction_timeout", "后台提取超时（秒）", 5, 180, 1],
-                ["batch_size", "后台每批消息上限", 5, 100, 1],
+                ["batch_size", "后台每批送审新消息上限", 5, 100, 1],
                 ["batch_age_seconds", "未满批次最长等待（秒）", 60, 86400, 1],
+                ["semantic_min_score", "纯语义候选最低分（不是置信概率）", 0, 1, 0.01],
                 ["retention_days", "未引用原文保留（天）", 1, 365, 1],
                 ["trace_days", "召回记录保留（天）", 1, 90, 1],
                 ["max_db_mb", "SQLite＋WAL 采集保护线（MiB）", 16, 4096, 1],

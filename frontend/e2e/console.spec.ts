@@ -78,7 +78,7 @@ test("AstrBot bridge, source inspection, edit, preview and settings without toke
 test("stale settings do not overwrite another editor", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "设置", exact: true }).click();
-  const batchSize = page.getByLabel("后台每批消息上限", { exact: true });
+  const batchSize = page.getByLabel("后台每批送审新消息上限", { exact: true });
   await expect(batchSize).toBeVisible();
   await batchSize.fill("45");
   const original = await page.evaluate(async () => {

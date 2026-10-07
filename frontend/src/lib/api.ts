@@ -59,6 +59,11 @@ export type Overview = {
   pending: number;
   index_queue: number;
   calls_today: number;
+  llm_usage_24h: {
+    stage: string; calls: number; succeeded: number; failed: number; running: number;
+    usage_known: number; input_tokens: number | null; output_tokens: number | null;
+    avg_input_tokens: number | null; avg_elapsed_ms: number | null;
+  }[];
   extraction_failed_messages: number;
   last_extraction_failure: { scope: string; reason: string; created: number } | null;
   disk_bytes: number;
@@ -85,6 +90,7 @@ export type Settings = {
   trace_days: number;
   max_db_mb: number;
   injection_chars: number;
+  semantic_min_score: number;
 };
 export type Recall = {
   reason: string;

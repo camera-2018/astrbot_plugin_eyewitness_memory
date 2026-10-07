@@ -17,6 +17,7 @@ from .eyewitness.context import history_markers, platform_time
 from .eyewitness.engine import Engine
 from .eyewitness.errors import failure_detail
 from .eyewitness.store import Store
+from .eyewitness.usage import ModelReply
 from .eyewitness.vector import VectorIndex
 
 PLUGIN = "astrbot_plugin_eyewitness_memory"
@@ -63,11 +64,11 @@ class EyewitnessMemoryPlugin(Star):
             await self.terminate()
             raise
 
-    async def generate(self, provider_id: str, system: str, prompt: str) -> str:
+    async def generate(self, provider_id: str, system: str, prompt: str) -> ModelReply:
         response = await self.context.llm_generate(
             chat_provider_id=provider_id, prompt=prompt, system_prompt=system, max_tokens=3000
         )
-        return response.completion_text or ""
+        return ModelReply.from_response(response)
 
     async def embed(self, provider_id: str, text: str):
         provider = self.context.get_provider_by_id(provider_id)

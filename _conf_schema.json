@@ -9,11 +9,12 @@
   "collection": {"description": "独立 Collection 前缀", "type": "string", "default": "eyewitness_memory_v1", "hint": "必须以 eyewitness_memory_ 开头，不要复用其他插件索引。"},
   "online_timeout": {"description": "单次在线时间预算（秒）", "type": "float", "default": 3.0, "slider": {"min": 0.5, "max": 30, "step": 0.5}},
   "extraction_timeout": {"description": "后台提取超时（秒）", "type": "float", "default": 60.0, "slider": {"min": 5, "max": 180, "step": 1}},
-  "batch_size": {"description": "后台每批消息上限", "type": "int", "default": 80, "slider": {"min": 5, "max": 100, "step": 1}},
+  "batch_size": {"description": "后台每批送审新消息上限", "type": "int", "default": 80, "slider": {"min": 5, "max": 100, "step": 1}, "hint": "本地最多扫描三倍原文，筛选后合批送审；另附有界引用上下文。低价值原文不会删除。"},
   "batch_age_seconds": {"description": "未满批次最长等待（秒）", "type": "int", "default": 900, "slider": {"min": 60, "max": 86400, "step": 1}},
   "retention_days": {"description": "未引用原文保留（天）", "type": "int", "default": 30, "slider": {"min": 1, "max": 365, "step": 1}},
   "trace_days": {"description": "召回记录保留（天）", "type": "int", "default": 7, "slider": {"min": 1, "max": 90, "step": 1}},
   "max_db_mb": {"description": "SQLite＋WAL 采集保护线（MiB）", "type": "int", "default": 512, "slider": {"min": 16, "max": 4096, "step": 1}},
   "injection_chars": {"description": "注入字符上限", "type": "int", "default": 8000, "slider": {"min": 200, "max": 16000, "step": 1}, "hint": "按字符计算，不等于 tokens。"},
+  "semantic_min_score": {"description": "纯语义候选最低分", "type": "float", "default": 0.55, "slider": {"min": 0.0, "max": 1.0, "step": 0.01}, "hint": "无具体关键词或明确人物匹配时，语义分数须达到此值才送模型核验。不是置信概率；更换向量模型后需重新观察。设为 0 可放开此筛选。"},
   "config_version": {"description": "配置迁移版本", "type": "int", "default": 0, "invisible": true}
 }

@@ -66,7 +66,7 @@ async def test_full_lexical_results_do_not_discard_semantic_match(store, monkeyp
             return [
                 {"id": foreign, "payload": {"version": 1}},
                 {"id": stale, "payload": {"version": 0}},
-                {"id": target, "payload": {"version": 1}},
+                {"id": target, "score": 0.7, "payload": {"version": 1}},
             ]
 
     result = await Engine(store, Model(answers(target, source)), Vector()).recall(
@@ -75,7 +75,7 @@ async def test_full_lexical_results_do_not_discard_semantic_match(store, monkeyp
     assert result["selected"][0]["id"] == target
     assert result["retrieval"]["lexical"] == 12
     assert result["retrieval"]["semantic"] == 1
-    assert len(result["retrieval"]["reviewed_ids"]) == 12
+    assert len(result["retrieval"]["reviewed_ids"]) == 1
     assert foreign not in result["retrieval"]["reviewed_ids"]
     assert stale not in result["retrieval"]["reviewed_ids"]
 

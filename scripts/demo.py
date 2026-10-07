@@ -63,13 +63,17 @@ async def run(port: int):
         async def generate(provider, system, prompt):
             data = json.loads(prompt)["data"]
             if "candidates" in data:
+                candidate = data["candidates"][0]
+                source = next(m for m in data["messages"] if m["id"] in candidate["source_ids"])
                 return json.dumps(
                     {
                         "decisions": [
                             {
                                 "id": m["id"],
-                                "action": "needs_source",
+                                "action": "accept",
                                 "reason": "演示：核对原始发言",
+                                "text": candidate["summary"] + "（历史陈述，当前状态未知）",
+                                "evidence": [{"message_id": source["id"], "quote": source["text"]}],
                             }
                             for m in data["candidates"][:1]
                         ]

@@ -130,7 +130,7 @@ async def test_old_schema_migration_keeps_unknown_send_time(tmp_path):
     await store.call("open")
     row = (await store.call("source_rows", SCOPE, ["old"]))[0]
     assert row["created"] == 1700000000 and row["sent_at"] is None
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 4
     await store.call("close")
     await store.call("open")
     assert (await store.call("source_rows", SCOPE, ["old"]))[0] == row

@@ -23,6 +23,7 @@ class Settings(BaseModel):
     trace_days: int = Field(default=7, ge=1, le=90)
     max_db_mb: int = Field(default=512, ge=16, le=4096)
     injection_chars: int = Field(default=8000, ge=200, le=16000)
+    semantic_min_score: float = Field(default=0.55, ge=0.0, le=1.0)
 
     @field_validator("allowed_scopes")
     @classmethod
@@ -94,6 +95,20 @@ class Verification(BaseModel):
     text: str = Field(max_length=600)
     reason: str = Field(max_length=300)
     evidence: list[EvidenceRef] = Field(default_factory=list, max_length=5)
+
+
+class GroundedDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    id: str
+    action: Literal["accept", "reject"]
+    reason: str = Field(max_length=300)
+    text: str = Field(default="", max_length=600)
+    evidence: list[EvidenceRef] = Field(default_factory=list, max_length=5)
+
+
+class GroundedReview(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    decisions: list[GroundedDecision] = Field(default_factory=list, max_length=3)
 
 
 def terms(text: str) -> list[str]:

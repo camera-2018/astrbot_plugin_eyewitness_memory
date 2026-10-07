@@ -20,12 +20,16 @@ class Model:
 
 def answers(mid, source):
     return [
-        {"decisions": [{"id": mid, "action": "needs_source", "reason": "核对计划的主体"}]},
         {
-            "supported": True,
-            "text": "alice 曾自述计划参加绘画比赛，当前状态未知。",
-            "reason": "本人原文支持",
-            "evidence": [{"message_id": source, "quote": "我计划下个月参加绘画比赛"}],
+            "decisions": [
+                {
+                    "id": mid,
+                    "action": "accept",
+                    "text": "alice 曾自述计划参加绘画比赛，当前状态未知。",
+                    "reason": "本人原文支持",
+                    "evidence": [{"message_id": source, "quote": "我计划下个月参加绘画比赛"}],
+                }
+            ]
         },
     ]
 
@@ -36,7 +40,7 @@ async def test_complete_active_flow(store):
     engine = Engine(store, model)
     result = await engine.recall(SCOPE, "之前绘画比赛的计划是什么", "alice")
     assert result["mode"] == "active" and len(result["selected"]) == 1
-    assert "当前状态未知" in result["injection"] and model.calls == 2
+    assert "当前状态未知" in result["injection"] and model.calls == 1
     assert len(await store.call("traces", SCOPE)) == 1
     assert "我计划下个月参加绘画比赛" in result["injection"]
     assert "采集时间（发送时间未知）" in result["injection"]
@@ -58,7 +62,7 @@ async def test_person_question_review_can_continue_to_source_verification(store)
     assert "同一人的相关候选" in instruction
     assert "普通接梗、提醒和操作指令" in instruction
     assert "不一定是被问到的人" in instruction
-    assert len(prompts) == 2
+    assert len(prompts) == 1
     assert source in result["selected"][0]["injected_message_ids"]
 
 
@@ -74,7 +78,7 @@ async def test_raw_context_reaches_verifier_and_main_model(store):
         return json.dumps(responses.pop(0))
 
     result = await Engine(store, model).recall(SCOPE, "绘画比赛")
-    messages = prompts[1]["data"]["messages"]
+    messages = prompts[0]["data"]["messages"]
     assert any(
         r["text"] == neighbor and r["sender_name"] == "小明" and r["time_kind"] == "平台发送时间"
         for r in messages
@@ -253,7 +257,7 @@ async def test_already_visible_source_is_not_reinjected(store):
 async def test_fabricated_quotes_fail_closed(store):
     mid, source = await seed(store)
     payload = answers(mid, source)
-    payload[1]["evidence"][0]["quote"] = "不存在的原文"
+    payload[0]["decisions"][0]["evidence"][0]["quote"] = "不存在的原文"
     assert not (await Engine(store, Model(payload)).recall(SCOPE, "绘画比赛"))["selected"]
 
 
@@ -303,7 +307,7 @@ async def test_invalid_json_degrades(store):
     model = Model([{"nonsense": True}])
     result = await Engine(store, model).recall(SCOPE, "绘画比赛")
     assert not result["injection"]
-    assert "相关性审核" in result["reason"]
+    assert "联合核验" in result["reason"]
     assert "多余字段" in result["reason"]
     traces = await store.call("traces", SCOPE)
     assert traces[0]["reason"] == result["reason"]
@@ -319,7 +323,7 @@ async def test_upstream_status_diagnostic_does_not_leak_exception_text(store):
         raise UpstreamError("sk-test-very-private-provider-key")
 
     result = await Engine(store, model).recall(SCOPE, "绘画比赛")
-    assert "相关性审核：上游 HTTP 429" in result["reason"]
+    assert "联合核验：上游 HTTP 429" in result["reason"]
     assert "sk-test" not in json.dumps(result, ensure_ascii=False)
     traces = await store.call("traces", SCOPE)
     assert "sk-test" not in json.dumps(traces, ensure_ascii=False)
@@ -332,7 +336,7 @@ async def test_empty_model_output_gives_specific_reason(store):
         return ""
 
     result = await Engine(store, model).recall(SCOPE, "绘画比赛")
-    assert "相关性审核：模型返回空内容" in result["reason"]
+    assert "联合核验：模型返回空内容" in result["reason"]
 
 
 async def test_recall_continues_after_old_daily_limit(store):

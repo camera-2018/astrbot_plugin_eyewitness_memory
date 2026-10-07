@@ -101,7 +101,7 @@ class VectorIndex:
             f"/collections/{name}/points/query",
             {
                 "query": vector,
-                "limit": 12,
+                "limit": 36,
                 "with_payload": True,
                 "filter": {"must": [{"key": "scope", "match": {"value": scope}}]},
             },

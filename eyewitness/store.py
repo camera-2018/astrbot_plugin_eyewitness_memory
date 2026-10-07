@@ -11,6 +11,7 @@ from typing import Any
 
 from .config import ConfigSettings, settings_revision
 from .context import bounded_context, context_message, message_order, message_time, platform_time
+from .errors import AuxiliaryModelFailure
 from .models import Candidate, Settings, extraction_noise, safe_text, terms
 
 
@@ -24,6 +25,7 @@ class Store:
         self.lock = asyncio.Lock()
         self.db: sqlite3.Connection | None = None
         self.config_settings: ConfigSettings | None = None
+        self.last_batch_scope = ""
 
     async def call(self, name: str, *args, **kwargs):
         async with self.lock:
@@ -40,7 +42,7 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path, check_same_thread=False, timeout=5)
         self.db.row_factory = sqlite3.Row
-        if self.db.execute("PRAGMA user_version").fetchone()[0] > 3:
+        if self.db.execute("PRAGMA user_version").fetchone()[0] > 4:
             self.db.close()
             self.db = None
             raise ValueError("数据库版本较新，不能用旧版插件打开")
@@ -86,6 +88,13 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS trace_scope_time ON traces(scope, created);
             CREATE TABLE IF NOT EXISTS budgets (day TEXT PRIMARY KEY, calls INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS model_calls (
+                id TEXT PRIMARY KEY, stage TEXT NOT NULL, status TEXT NOT NULL,
+                created REAL NOT NULL, elapsed_ms INTEGER, prompt_chars INTEGER NOT NULL,
+                input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER,
+                error TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS model_calls_time ON model_calls(created);
             CREATE TABLE IF NOT EXISTS privacy_epoch (id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL);
             INSERT OR IGNORE INTO privacy_epoch VALUES(1,0);
         """)
@@ -109,7 +118,11 @@ class Store:
                 "UPDATE messages SET processed=3,extraction_error=? WHERE processed=4",
                 ("上次提取被中断，未自动重试",),
             )
-            self.db.execute("PRAGMA user_version=3")
+            self.db.execute(
+                "UPDATE model_calls SET status='interrupted',error='请求被中断，用量未知' "
+                "WHERE status='running'"
+            )
+            self.db.execute("PRAGMA user_version=4")
             self.db.execute("""
                 UPDATE settings SET data=json_set(data, '$.mode', 'off')
                 WHERE json_extract(data, '$.mode')='shadow'
@@ -249,21 +262,47 @@ class Store:
         ).fetchone()
         return dict(row) if row else None
 
-    def pending_batch(self, cfg: Settings):
+    def pending_batch(self, cfg: Settings, scan_limit: int | None = None):
         now = time.time()
-        for scope in cfg.allowed_scopes:
+        scopes = list(cfg.allowed_scopes)
+        if self.last_batch_scope in scopes:
+            start = scopes.index(self.last_batch_scope) + 1
+            scopes = scopes[start:] + scopes[:start]
+        for scope in scopes:
             row = self.db.execute(
                 "SELECT count(*),min(created) FROM messages WHERE scope=? AND processed=0", (scope,)
             ).fetchone()
             if row[0] and (row[0] >= cfg.batch_size or now - row[1] >= cfg.batch_age_seconds):
+                self.last_batch_scope = scope
                 return [
                     dict(r)
                     for r in self.db.execute(
                         "SELECT * FROM messages WHERE scope=? AND processed=0 ORDER BY created LIMIT ?",
-                        (scope, cfg.batch_size),
+                        (scope, min(scan_limit or cfg.batch_size, 300)),
                     )
                 ]
         return []
+
+    def extraction_context(self, batch: list[dict]):
+        """Bounded preceding/replied-to messages, including already processed rows."""
+        if not batch:
+            return []
+        scope = batch[0]["scope"]
+        rows = [
+            dict(r)
+            for r in self.db.execute(
+                "SELECT * FROM messages WHERE scope=? AND created<? AND created>=? "
+                "ORDER BY created DESC LIMIT 5",
+                (scope, batch[0]["created"], batch[0]["created"] - 900),
+            )
+        ]
+        for item in batch:
+            if item.get("reply_id"):
+                row = self.referenced_message(scope, item["reply_id"])
+                if row:
+                    rows.append(row)
+        batch_ids = {r["id"] for r in batch}
+        return list({r["id"]: r for r in rows if r["id"] not in batch_ids}.values())[:20]
 
     def claim_extraction(self, batch: list[dict]) -> bool:
         """Persist the attempt before calling a billable provider, all-or-nothing."""
@@ -297,26 +336,37 @@ class Store:
     def source_rows(self, scope: str, ids: list[str]):
         if not ids:
             return []
-        marks = ",".join("?" for _ in ids[:100])
+        marks = ",".join("?" for _ in ids[:500])
         return [
             dict(r)
             for r in self.db.execute(
                 f"SELECT * FROM messages WHERE scope=? AND id IN ({marks}) ORDER BY created",
-                [scope, *ids[:100]],
+                [scope, *ids[:500]],
             )
         ]
 
-    def save_extraction(self, batch: list[dict], candidates: list[Candidate]):
+    def save_extraction(
+        self,
+        batch: list[dict],
+        candidates: list[Candidate],
+        context: list[dict] = (),
+        expected_epoch: int | None = None,
+    ):
         if not batch:
             return []
+        if expected_epoch is not None and self.epoch() != expected_epoch:
+            raise AuxiliaryModelFailure("提取期间发生隐私删除，候选已撤销")
         scope = batch[0]["scope"]
         # Reload source rows: concurrent privacy deletion must invalidate in-flight extraction.
-        rows = {r["id"]: r for r in self.source_rows(scope, [r["id"] for r in batch])}
+        rows = {r["id"]: r for r in self.source_rows(scope, [r["id"] for r in [*batch, *context]])}
+        batch_ids = {r["id"] for r in batch}
         ids = []
         with self.db:
             for c in candidates:
                 if c.stance in ("joke", "uncertain") or not c.subject_id:
                     continue
+                if not any(e.message_id in batch_ids for e in c.evidence):
+                    continue  # Context alone must not repeatedly create old memories.
                 if any(
                     e.message_id not in rows or e.quote not in rows[e.message_id]["text"]
                     for e in c.evidence
@@ -385,7 +435,9 @@ class Store:
         result["sources"] = [
             dict(r)
             for r in self.db.execute(
-                "SELECT m.*,s.quote FROM sources s JOIN messages m ON m.id=s.message_id WHERE s.memory_id=? AND m.scope=? ORDER BY m.created",
+                # Start with the handful of sources, not all messages in a busy
+                # group merely to satisfy ORDER BY through msg_scope_time.
+                "SELECT m.*,s.quote FROM sources s CROSS JOIN messages m ON m.id=s.message_id WHERE s.memory_id=? AND m.scope=? ORDER BY m.created",
                 (mid, row["scope"]),
             )
         ]
@@ -449,8 +501,38 @@ class Store:
         return [
             dict(r)
             for r in self.db.execute(
-                "SELECT m.* FROM memory_fts f JOIN memories m ON m.id=f.id WHERE memory_fts MATCH ? AND m.scope=? AND m.status='active' AND m.expires>? ORDER BY bm25(memory_fts) LIMIT 12",
+                "SELECT m.*,bm25(memory_fts) AS lexical_score FROM memory_fts f JOIN memories m ON m.id=f.id WHERE memory_fts MATCH ? AND m.scope=? AND m.status='active' AND m.expires>? ORDER BY bm25(memory_fts) LIMIT 36",
                 (match, scope, time.time()),
+            )
+        ]
+
+    def named_subjects(self, scope: str, query: str) -> list[str]:
+        # Only names actually attached to source messages in this scope. Short
+        # names and collisions are deliberately not resolved to a single person.
+        rows = self.db.execute(
+            "SELECT DISTINCT x.sender_id,x.sender_name FROM sources s "
+            "CROSS JOIN messages x ON x.id=s.message_id WHERE x.scope=?",
+            (scope,),
+        )
+        return list(
+            dict.fromkeys(
+                r[0]
+                for r in rows
+                if (len(r[0]) >= 3 and r[0] in query)
+                or (len(r[1]) >= 2 and r[1].lower() in query.lower())
+            )
+        )[:20]
+
+    def subject_memories(self, scope: str, subjects: list[str]):
+        if not subjects:
+            return []
+        marks = ",".join("?" for _ in subjects[:20])
+        return [
+            dict(r)
+            for r in self.db.execute(
+                f"SELECT * FROM memories WHERE scope=? AND subject_id IN ({marks}) "
+                "AND status='active' AND expires>? ORDER BY updated DESC LIMIT 24",
+                [scope, *subjects[:20], time.time()],
             )
         ]
 
@@ -507,11 +589,40 @@ class Store:
             self.db.execute("DELETE FROM traces WHERE scope=?", (scope,))
         return len(ids)
 
-    def record_call(self):
+    def record_call(self, stage: str = "", prompt_chars: int = 0):
         day = time.strftime("%Y-%m-%d", time.gmtime())
         with self.db:
             self.db.execute("INSERT OR IGNORE INTO budgets VALUES(?,0)", (day,))
             self.db.execute("UPDATE budgets SET calls=calls+1 WHERE day=?", (day,))
+            if stage:
+                cid = str(uuid.uuid4())
+                self.db.execute(
+                    "INSERT INTO model_calls(id,stage,status,created,prompt_chars) VALUES(?,?,'running',?,?)",
+                    (cid, stage, time.time(), prompt_chars),
+                )
+                return cid
+
+    def finish_call(self, cid, status, elapsed_ms, usage, error=""):
+        with self.db:
+            self.db.execute(
+                "UPDATE model_calls SET status=?,elapsed_ms=?,input_tokens=?,output_tokens=?,"
+                "cached_tokens=?,error=? WHERE id=?",
+                (status, elapsed_ms, *usage, safe_text(error, 500), cid),
+            )
+
+    def usage_stats(self):
+        return [
+            dict(r)
+            for r in self.db.execute(
+                "SELECT stage,count(*) AS calls,sum(status='success') AS succeeded,"
+                "sum(status NOT IN ('success','running')) AS failed,"
+                "sum(status='running') AS running,count(input_tokens) AS usage_known,"
+                "sum(input_tokens) AS input_tokens,avg(input_tokens) AS avg_input_tokens,"
+                "sum(output_tokens) AS output_tokens,avg(elapsed_ms) AS avg_elapsed_ms "
+                "FROM model_calls WHERE created>=? GROUP BY stage",
+                (time.time() - 86400,),
+            )
+        ]
 
     def epoch(self):
         return self.db.execute("SELECT value FROM privacy_epoch WHERE id=1").fetchone()[0]
@@ -591,6 +702,11 @@ class Store:
                 "DELETE FROM traces WHERE created<?", (time.time() - cfg.trace_days * 86400,)
             )
             self.db.execute("DELETE FROM budgets WHERE day<date('now','-30 day')")
+            self.db.execute("DELETE FROM model_calls WHERE created<?", (time.time() - 30 * 86400,))
+            self.db.execute(
+                "DELETE FROM model_calls WHERE id IN "
+                "(SELECT id FROM model_calls ORDER BY created DESC LIMIT -1 OFFSET 10000)"
+            )
         self.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
 
     def stats(self):
@@ -611,6 +727,7 @@ class Store:
             ).fetchone()[0],
             "index_queue": self.db.execute("SELECT count(*) FROM outbox").fetchone()[0],
             "calls_today": row[0] if row else 0,
+            "llm_usage_24h": self.usage_stats(),
             "extraction_failed_messages": self.db.execute(
                 "SELECT count(*) FROM messages WHERE processed=3"
             ).fetchone()[0],
