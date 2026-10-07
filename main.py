@@ -16,6 +16,7 @@ from .eyewitness.budget import request_budget
 from .eyewitness.context import history_markers, platform_time
 from .eyewitness.engine import Engine
 from .eyewitness.errors import failure_detail
+from .eyewitness.generation import generate_once
 from .eyewitness.store import Store
 from .eyewitness.usage import ModelReply
 from .eyewitness.vector import VectorIndex
@@ -65,9 +66,7 @@ class EyewitnessMemoryPlugin(Star):
             raise
 
     async def generate(self, provider_id: str, system: str, prompt: str) -> ModelReply:
-        response = await self.context.llm_generate(
-            chat_provider_id=provider_id, prompt=prompt, system_prompt=system, max_tokens=3000
-        )
+        response = await generate_once(self.context, provider_id, system, prompt)
         return ModelReply.from_response(response)
 
     async def embed(self, provider_id: str, text: str):

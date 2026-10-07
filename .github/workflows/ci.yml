@@ -49,3 +49,4 @@ jobs:
       - run: uv sync --locked
       - run: uv pip install 'astrbot==4.28.1'
       - run: PYTHONPATH=. .venv/bin/python scripts/check_astrbot.py
+      - run: PYTHONPATH=. .venv/bin/python scripts/check_provider_retry.py
