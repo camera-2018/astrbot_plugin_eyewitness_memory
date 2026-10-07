@@ -116,6 +116,36 @@ test("mobile navigation and screenshot", async ({ page }) => {
   await page.screenshot({ path: "test-results/desktop.png", fullPage: true });
 });
 
+test("failed extraction status remains visible after reload on mobile", async ({ page }) => {
+  await page.route("**/api/bridge", async (route) => {
+    if (route.request().postDataJSON()?.path !== "overview") return route.continue();
+    const response = await route.fetch();
+    const data = await response.json();
+    await route.fulfill({
+      response,
+      json: {
+        ...data,
+        extraction_failed_messages: 80,
+        last_extraction_failure: {
+          scope: "demo:GroupMessage:10001",
+          reason: "后台提取：模型返回空内容或非文本",
+          created: 1791314400,
+        },
+      },
+    });
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  const notice = page.getByText("提取失败原文：80 条", { exact: false });
+  await expect(notice).toBeVisible();
+  await expect(notice).toContainText("不会自动重试");
+  await expect(notice).toContainText("后台提取：模型返回空内容或非文本");
+  await page.reload();
+  await expect(notice).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: "test-results/extraction-failure-mobile.png", fullPage: true });
+});
+
 test("disable and delete memory with explicit confirmation", async ({
   page,
 }) => {

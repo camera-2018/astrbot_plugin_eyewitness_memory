@@ -90,10 +90,10 @@ class Engine:
         except ValidationError as exc:
             raise AuxiliaryModelFailure(f"{stage}：{failure_detail(exc)}") from exc
 
-    async def extract_once(self, cfg: Settings):
+    async def extract_once(self, cfg: Settings) -> bool:
         batch = await self.store.call("pending_batch", cfg)
         if not batch:
-            return
+            return False
         bounded, size = [], 0
         for row in batch:
             size += len(row["text"]) + 300
@@ -111,22 +111,37 @@ class Engine:
             useful.append(row)
         if not useful:
             await self.store.call("save_extraction", batch, [])
-            return
-        result = await asyncio.wait_for(
-            self.ask(
-                cfg,
-                "提取值得日后回顾的偏好、目标、事件、约定。避免调侃、命令、临时情绪、敏感信息。"
-                "必须绑定 subject_id 和逐字 evidence；事件摘要写明时间。连续短句可合并但不同话题不能混合。"
-                "无法判断是否认真陈述时 stance=uncertain。最多8条，可以为空。",
-                {"messages": [context_message(r) for r in useful]},
-                Extraction,
-            ),
-            timeout=cfg.extraction_timeout,
-        )
-        # Configuration may change while the external request is in flight.
-        current = await self.store.call("get_settings")
-        if current.mode != "off" and batch[0]["scope"] in current.allowed_scopes:
+            return False
+        if not await self.store.call("claim_extraction", batch):
+            return False
+        try:
+            result = await asyncio.wait_for(
+                self.ask(
+                    cfg,
+                    "提取值得日后回顾的偏好、目标、事件、约定。避免调侃、命令、临时情绪、敏感信息。"
+                    "必须绑定 subject_id 和逐字 evidence；事件摘要写明时间。连续短句可合并但不同话题不能混合。"
+                    "无法判断是否认真陈述时 stance=uncertain。最多8条，可以为空。",
+                    {"messages": [context_message(r) for r in useful]},
+                    Extraction,
+                ),
+                timeout=cfg.extraction_timeout,
+            )
+            # Configuration may change while the external request is in flight.
+            current = await self.store.call("get_settings")
+            if current.mode == "off" or batch[0]["scope"] not in current.allowed_scopes:
+                raise AuxiliaryModelFailure("提取期间该群记录已关闭，未保存候选")
             await self.store.call("save_extraction", batch, result.candidates)
+            return True
+        except asyncio.CancelledError:
+            await self.store.call("fail_extraction", batch, "提取被中断，未自动重试")
+            raise
+        except Exception as exc:
+            reason = failure_detail(exc)
+            await self.store.call("fail_extraction", batch, reason)
+            raise AuxiliaryModelFailure(
+                f"{reason}；群 {batch[0]['scope']} 批次 {batch[0]['id']} "
+                f"共 {len(batch)} 条原文已保留，不再自动重试"
+            ) from exc
 
     async def index_once(self, cfg: Settings):
         if not self.vector or not self.vector.enabled(cfg):
@@ -159,12 +174,12 @@ class Engine:
                 if cfg.mode != "off":
                     if cfg.provider_id:
                         try:
-                            await self.extract_once(cfg)
+                            completed = await self.extract_once(cfg)
                         except Exception as exc:
                             self.last_error = "提取失败：" + failure_detail(exc)
                             log.warning("Eyewitness Memory %s", self.last_error)
                         else:
-                            if self.last_error.startswith("提取失败："):
+                            if completed and self.last_error.startswith("提取失败："):
                                 self.last_error = ""
                     await self.index_once(cfg)
                 self.last_cycle = time.time()

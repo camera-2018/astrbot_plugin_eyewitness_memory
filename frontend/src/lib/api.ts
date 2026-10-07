@@ -59,6 +59,8 @@ export type Overview = {
   pending: number;
   index_queue: number;
   calls_today: number;
+  extraction_failed_messages: number;
+  last_extraction_failure: { scope: string; reason: string; created: number } | null;
   disk_bytes: number;
   mode: string;
   last_error: string;

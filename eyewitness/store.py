@@ -17,6 +17,8 @@ from .models import Candidate, Settings, extraction_noise, safe_text, terms
 class Store:
     """Serialized SQLite access off the event loop; each write is one transaction."""
 
+    # messages.processed: 0 pending, 1 complete, 2 noise, 3 failed, 4 in flight.
+
     def __init__(self, path: Path):
         self.path = path
         self.lock = asyncio.Lock()
@@ -38,7 +40,7 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path, check_same_thread=False, timeout=5)
         self.db.row_factory = sqlite3.Row
-        if self.db.execute("PRAGMA user_version").fetchone()[0] > 2:
+        if self.db.execute("PRAGMA user_version").fetchone()[0] > 3:
             self.db.close()
             self.db = None
             raise ValueError("数据库版本较新，不能用旧版插件打开")
@@ -92,10 +94,22 @@ class Store:
             columns = {r[1] for r in self.db.execute("PRAGMA table_info(messages)")}
             if "sent_at" not in columns:
                 self.db.execute("ALTER TABLE messages ADD COLUMN sent_at REAL")
+            if "extraction_error" not in columns:
+                self.db.execute(
+                    "ALTER TABLE messages ADD COLUMN extraction_error TEXT NOT NULL DEFAULT ''"
+                )
+            if "extraction_attempted_at" not in columns:
+                self.db.execute("ALTER TABLE messages ADD COLUMN extraction_attempted_at REAL")
             self.db.execute(
                 "CREATE INDEX IF NOT EXISTS msg_event_time ON messages(scope,COALESCE(sent_at,created),created,id)"
             )
-            self.db.execute("PRAGMA user_version=2")
+            # An interrupted request may already have been billed. Never resubmit it
+            # automatically after a process crash or plugin reload.
+            self.db.execute(
+                "UPDATE messages SET processed=3,extraction_error=? WHERE processed=4",
+                ("上次提取被中断，未自动重试",),
+            )
+            self.db.execute("PRAGMA user_version=3")
             self.db.execute("""
                 UPDATE settings SET data=json_set(data, '$.mode', 'off')
                 WHERE json_extract(data, '$.mode')='shadow'
@@ -250,6 +264,35 @@ class Store:
                     )
                 ]
         return []
+
+    def claim_extraction(self, batch: list[dict]) -> bool:
+        """Persist the attempt before calling a billable provider, all-or-nothing."""
+        if not batch:
+            return False
+        scope = batch[0]["scope"]
+        ids = list(dict.fromkeys(r["id"] for r in batch))
+        if any(r["scope"] != scope for r in batch):
+            raise ValueError("提取批次不能跨群")
+        marks = ",".join("?" for _ in ids)
+        with self.db:
+            cursor = self.db.execute(
+                f"UPDATE messages SET processed=4,extraction_error='',extraction_attempted_at=? "
+                f"WHERE scope=? AND id IN ({marks}) AND processed=0 "
+                f"AND (SELECT count(*) FROM messages WHERE scope=? "
+                f"AND id IN ({marks}) AND processed=0)=?",
+                [time.time(), scope, *ids, scope, *ids, len(ids)],
+            )
+        return cursor.rowcount == len(ids)
+
+    def fail_extraction(self, batch: list[dict], reason: str):
+        # Only update claimed rows; never recreate privacy-deleted messages or
+        # overwrite already completed work. Diagnostics contain no response body.
+        with self.db:
+            self.db.executemany(
+                "UPDATE messages SET processed=3,extraction_error=? "
+                "WHERE scope=? AND id=? AND processed=4",
+                [(safe_text(reason, 500), r["scope"], r["id"]) for r in batch],
+            )
 
     def source_rows(self, scope: str, ids: list[str]):
         if not ids:
@@ -553,6 +596,10 @@ class Store:
     def stats(self):
         day = time.strftime("%Y-%m-%d", time.gmtime())
         row = self.db.execute("SELECT calls FROM budgets WHERE day=?", (day,)).fetchone()
+        failure = self.db.execute(
+            "SELECT scope,extraction_error AS reason,extraction_attempted_at AS created "
+            "FROM messages WHERE processed=3 ORDER BY extraction_attempted_at DESC LIMIT 1"
+        ).fetchone()
         return {
             "messages": self.db.execute("SELECT count(*) FROM messages").fetchone()[0],
             "memories": self.db.execute("SELECT count(*) FROM memories").fetchone()[0],
@@ -564,5 +611,9 @@ class Store:
             ).fetchone()[0],
             "index_queue": self.db.execute("SELECT count(*) FROM outbox").fetchone()[0],
             "calls_today": row[0] if row else 0,
+            "extraction_failed_messages": self.db.execute(
+                "SELECT count(*) FROM messages WHERE processed=3"
+            ).fetchone()[0],
+            "last_extraction_failure": dict(failure) if failure else None,
             "disk_bytes": self.size_bytes(),
         }

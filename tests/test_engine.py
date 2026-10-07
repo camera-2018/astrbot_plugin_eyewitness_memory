@@ -347,19 +347,31 @@ async def test_recall_continues_after_old_daily_limit(store):
     assert (await store.call("stats"))["calls_today"] == 201
 
 
-async def test_background_extraction_real_store_and_retry(store):
+async def test_background_extraction_failure_skips_batch_and_allows_next_group(store):
     text = "我计划下个月参加绘画比赛"
     source = await store.call(
         "capture", SCOPE, "background", "alice", "Alice", text, None, time.time() - 1000
     )
     cfg = await store.call("get_settings")
-    # Failed parse must leave pending messages for a later retry.
+    # Failed parse must leave source text, not a billable automatic retry.
     engine = Engine(store, Model([{"wrong": True}]))
     import pytest
 
     with pytest.raises(Exception):
         await engine.extract_once(cfg)
-    assert len(await store.call("pending_batch", cfg)) == 1
+    assert not await store.call("pending_batch", cfg)
+    failed = (await store.call("source_rows", SCOPE, [source]))[0]
+    assert failed["processed"] == 3 and failed["text"] == text
+    assert "多余字段" in failed["extraction_error"]
+    await store.call("close")
+    await store.call("open")
+    for _ in range(3):
+        assert not await engine.extract_once(cfg)
+    assert engine.generate.calls == 1
+
+    next_source = await store.call(
+        "capture", OTHER, "next-group", "alice", "Alice", text, None, time.time() - 1000
+    )
     engine.generate = Model(
         [
             {
@@ -369,12 +381,13 @@ async def test_background_extraction_real_store_and_retry(store):
                         "kind": "goal",
                         "subject_id": "alice",
                         "stance": "self_report",
-                        "evidence": [{"message_id": source, "quote": text}],
+                        "evidence": [{"message_id": next_source, "quote": text}],
                     }
                 ]
             }
         ]
     )
-    await engine.extract_once(cfg)
+    assert await engine.extract_once(cfg)
     assert not await store.call("pending_batch", cfg)
-    assert len(await store.call("search", SCOPE, "绘画比赛")) == 1
+    assert len(await store.call("search", OTHER, "绘画比赛")) == 1
+    assert not await store.call("search", SCOPE, "绘画比赛")

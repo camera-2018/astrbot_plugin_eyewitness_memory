@@ -163,6 +163,17 @@ export default function App() {
         {overview?.last_error && (
           <div className="notice mt-5">最近后台状态：{overview.last_error}</div>
         )}
+        {!!overview?.extraction_failed_messages && (
+          <div className="notice mt-5">
+            提取失败原文：{overview.extraction_failed_messages} 条，已保留，不会自动重试，不阻塞后续批次。
+            {overview.last_extraction_failure && (
+              <div className="mt-1">
+                最近失败：{date(overview.last_extraction_failure.created)} · {overview.last_extraction_failure.scope}
+                <br />{overview.last_extraction_failure.reason}
+              </div>
+            )}
+          </div>
+        )}
         {page !== "settings" && (
           <div className="toolbar">
             <select
