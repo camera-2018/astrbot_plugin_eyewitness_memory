@@ -13,6 +13,10 @@ class Settings(BaseModel):
     bot_ids: list[str] = Field(default_factory=list, max_length=500)
     provider_id: str = ""
     embedding_provider_id: str = ""
+    systemone_provider_id: str = ""
+    systemone_model: str = ""
+    systemone_api_path: str = "/typesafe/v1/systemone"
+    systemone_timeout: float = Field(default=3.0, ge=0.2, le=10)
     qdrant_url: str = ""
     collection: str = "eyewitness_memory_v1"
     online_timeout: float = Field(default=3.0, ge=0.5, le=30)
@@ -24,6 +28,20 @@ class Settings(BaseModel):
     max_db_mb: int = Field(default=512, ge=16, le=4096)
     injection_chars: int = Field(default=8000, ge=200, le=16000)
     semantic_min_score: float = Field(default=0.55, ge=0.0, le=1.0)
+
+    @field_validator("systemone_model")
+    @classmethod
+    def valid_systemone_model(cls, value: str) -> str:
+        if value and not re.fullmatch(r"[A-Za-z0-9_@/.-]{1,128}", value):
+            raise ValueError("System One 模型名只能包含字母、数字、_ @ / . -")
+        return value
+
+    @field_validator("systemone_api_path")
+    @classmethod
+    def valid_systemone_path(cls, value: str) -> str:
+        if not re.fullmatch(r"(?:/[A-Za-z0-9_-]+)*/v1/systemone", value):
+            raise ValueError("System One 路径必须为相对路径，如 /typesafe/v1/systemone")
+        return value
 
     @field_validator("allowed_scopes")
     @classmethod

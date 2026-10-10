@@ -560,6 +560,18 @@ function RecallResult({ result }: { result: Recall }) {
           向量检索已回退到关键词检索：{result.vector_error || "原因未知"}
         </div>
       )}
+      {result.systemone && (
+        <details className="memory-card text-sm">
+          <summary>System One 候选排序 · {result.systemone.model} · {result.systemone.status}</summary>
+          <p className="subtle mt-3">{result.systemone.reason || "只调整优先级；最终是否注入仍由辅助模型核验。"}</p>
+          {Object.entries(result.systemone.decisions).map(([id, d]) => (
+            <p className="subtle mt-2" key={id}>
+              {id.slice(0, 8)} · 相关性 {d.relevance?.choice || "未完成"} · 原文初核 {d.support?.choice || "未运行"}
+              {d.error ? ` · ${d.error}` : ` · 优先分 ${d.priority.toFixed(3)}`}
+            </p>
+          ))}
+        </details>
+      )}
       {result.injection && (
         <div className="memory-card whitespace-pre-wrap text-sm leading-7">
           <h3 className="font-medium mb-3">拟注入内容</h3>
@@ -997,6 +1009,34 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
           >
             重建向量索引
           </Button>
+        </section>
+        <section className="memory-card space-y-5">
+          <h2 className="font-medium">System One 候选排序（可选）</h2>
+          <p className="subtle">Jev / Clef 只辅助排序，不生成记忆，也不直接接受或删除候选。失败不重试，继续由辅助模型核验；开启后会增加决策模型调用。</p>
+          <div className="grid sm:grid-cols-2 gap-5">
+            <Field title="System One 提供方" hint="只复用所选提供方的地址和密钥，不调用它的聊天模型。">
+              <select aria-label="System One 提供方" value={cfg.systemone_provider_id}
+                onChange={(e) => patch("systemone_provider_id", e.target.value)}>
+                <option value="">关闭 System One 排序</option>
+                {cfg.systemone_provider_id && !providers.chat.includes(cfg.systemone_provider_id) && (
+                  <option value={cfg.systemone_provider_id}>{cfg.systemone_provider_id}（当前不可用）</option>
+                )}
+                {providers.chat.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </Field>
+            <Field title="System One 模型名">
+              <Input placeholder="jev-1.13.0 或 clef-flash" value={cfg.systemone_model}
+                onChange={(e) => patch("systemone_model", e.target.value)} />
+            </Field>
+            <Field title="System One 接口路径">
+              <Input placeholder="/typesafe/v1/systemone" value={cfg.systemone_api_path}
+                onChange={(e) => patch("systemone_api_path", e.target.value)} />
+            </Field>
+            <Field title="排序时间上限（秒）" hint="同时不超过剩余在线时间预算的四分之一，为最终核验保留时间。">
+              <Input type="number" min={0.2} max={10} step={0.2} required value={cfg.systemone_timeout}
+                onChange={(e) => patch("systemone_timeout", Number(e.target.value))} />
+            </Field>
+          </div>
         </section>
         <section className="memory-card space-y-5">
           <h2 className="font-medium">处理与保留</h2>

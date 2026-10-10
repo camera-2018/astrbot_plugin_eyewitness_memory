@@ -85,6 +85,10 @@ export type Settings = {
   bot_ids: string[];
   provider_id: string;
   embedding_provider_id: string;
+  systemone_provider_id: string;
+  systemone_model: string;
+  systemone_api_path: string;
+  systemone_timeout: number;
   qdrant_url: string;
   collection: string;
   online_timeout: number;
@@ -104,6 +108,18 @@ export type Recall = {
   elapsed_ms?: number;
   vector_fallback?: boolean;
   vector_error?: string;
+  systemone?: {
+    model: string;
+    status: string;
+    reason?: string;
+    decisions: Record<string, {
+      priority: number;
+      actual_model?: string;
+      relevance?: { choice: string };
+      support?: { choice: string };
+      error?: string;
+    }>;
+  };
   selected: { id: string; text: string }[];
   candidates: {
     id: string;

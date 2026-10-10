@@ -39,6 +39,7 @@ from .retrieval import (
     rank_candidates,
 )
 from .store import Store
+from .systemone import candidate_request
 from .usage import ModelReply
 from .vector import VectorIndex
 
@@ -71,11 +72,20 @@ REVIEW_INSTRUCTION = (
 
 
 class Engine:
-    def __init__(self, store: Store, generate, vector: VectorIndex | None = None, report=None):
+    def __init__(
+        self,
+        store: Store,
+        generate,
+        vector: VectorIndex | None = None,
+        report=None,
+        *,
+        systemone=None,
+    ):
         self.store = store
         self.generate = generate
         self.vector = vector
         self.report = report or (lambda message: log.warning("Eyewitness Memory %s", message))
+        self.systemone = systemone
         self.online = asyncio.Semaphore(2)
         self.worker_task: asyncio.Task | None = None
         self.last_error = ""
@@ -272,7 +282,7 @@ class Engine:
         else:
             try:
                 async with self.online:
-                    async with asyncio.timeout(cfg.online_timeout):
+                    async with asyncio.timeout(cfg.online_timeout) as online_budget:
                         await self._recall(
                             cfg,
                             scope,
@@ -282,6 +292,7 @@ class Engine:
                             visible,
                             result,
                             conversation_hint(conversation),
+                            deadline=online_budget.when(),
                         )
             except TimeoutError:
                 result["reason"] = result["stage"] + "达到记忆时间预算，未完成核验的候选不注入"
@@ -386,7 +397,9 @@ class Engine:
             )
         return result
 
-    async def _recall(self, cfg, scope, query, sender_id, reply_id, visible, result, conversation):
+    async def _recall(
+        self, cfg, scope, query, sender_id, reply_id, visible, result, conversation, *, deadline
+    ):
         if not reply_id and direct_operation(query):
             result["reason"] = "明确的即时操作指令，无历史指代，跳过长期记忆"
             result["retrieval"] = {"reviewed_ids": [], "intent_skip": True}
@@ -495,6 +508,19 @@ class Engine:
                 "本地筛选未发现具体关联，未调用辅助模型" if skipped else "没有合适的历史候选"
             )
             return
+        if self.systemone and cfg.systemone_provider_id and cfg.systemone_model:
+            candidates = await self.prioritize(
+                cfg,
+                candidates,
+                pool,
+                contexts,
+                query,
+                sender_id,
+                conversation,
+                quoted,
+                result,
+                deadline=deadline,
+            )
         result["stage"] = "联合核验"
         payload, memory_aliases, source_aliases = compact_review(
             {
@@ -571,3 +597,112 @@ class Engine:
             else:
                 result["candidates"][-1]["verification"] = "逐字证据缺失、越界或未覆盖直接来源"
         result["reason"] = "来源核验完成" if result["selected"] else "候选未通过相关性或来源审核"
+
+    async def ask_systemone(self, cfg, stage, body):
+        cid = await self.store.call("record_call", stage, len(json.dumps(body, ensure_ascii=False)))
+        started = time.monotonic()
+        usage, status, error = (None, None, None), "failed", ""
+        try:
+            reply = await self.systemone(cfg, body)
+            usage = (reply.input_tokens, reply.output_tokens, None)
+            status = "success"
+            return reply
+        except asyncio.CancelledError:
+            status, error = "interrupted", "System One 时间预算结束；不重试，保留 Gemini 核验"
+            raise
+        except Exception as exc:
+            error = failure_detail(exc)
+            raise
+        finally:
+            await self.store.call(
+                "finish_call", cid, status, round((time.monotonic() - started) * 1000), usage, error
+            )
+
+    async def prioritize(
+        self,
+        cfg,
+        candidates,
+        pool,
+        contexts,
+        query,
+        sender_id,
+        conversation,
+        quoted,
+        result,
+        *,
+        deadline,
+    ):
+        # The entire advisory phase shares a small part of the online budget.
+        # Negative decisions never remove candidates: Jev can miss real memories.
+        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+        seconds = min(cfg.systemone_timeout, remaining / 4)
+        trace = {"model": cfg.systemone_model, "status": "running", "decisions": {}}
+        result["systemone"] = trace
+        if seconds < 0.1:
+            trace.update(status="fallback", reason="余量不足，跳过排序，保留 Gemini 核验")
+            return candidates
+        scores = {}
+
+        async def judge(m):
+            mid = m["id"]
+            decision = trace["decisions"][mid] = {"priority": 0.0}
+            try:
+                rows = [r for r in pool if r["id"] in contexts[mid]]
+                rel = await self.ask_systemone(
+                    cfg,
+                    "System One 相关性",
+                    candidate_request(
+                        cfg,
+                        m,
+                        rows,
+                        phase="relevance",
+                        query=query,
+                        sender_id=sender_id,
+                        conversation=conversation,
+                        quoted=quoted,
+                    ),
+                )
+                decision.update(actual_model=rel.model, relevance=rel.answers["relevance"])
+                if rel.answers["relevance"]["choice"] != "relevant":
+                    return
+                source = await self.ask_systemone(
+                    cfg,
+                    "System One 原文初核",
+                    candidate_request(
+                        cfg,
+                        m,
+                        rows,
+                        phase="support",
+                    ),
+                )
+                decision["support"] = source.answers["support"]
+                if source.answers["support"]["choice"] == "supported":
+                    scores[mid] = (
+                        rel.answers["relevance"]["probabilities"]["relevant"]
+                        * source.answers["support"]["probabilities"]["supported"]
+                    )
+                    decision["priority"] = scores[mid]
+            except asyncio.CancelledError:
+                decision["error"] = "排序时间预算结束；候选未删除"
+                raise
+            except Exception as exc:
+                decision["error"] = failure_detail(exc)
+                self.report("System One 排序降级：" + decision["error"])
+
+        jobs = [asyncio.create_task(judge(m)) for m in candidates]
+        try:
+            async with asyncio.timeout(seconds):
+                await asyncio.gather(*jobs)
+            trace["status"] = (
+                "partial" if any("error" in d for d in trace["decisions"].values()) else "success"
+            )
+        except TimeoutError:
+            trace.update(status="partial", reason="排序达到时间预算，继续 Gemini 最终核验")
+        finally:
+            for job in jobs:
+                if not job.done():
+                    job.cancel()
+            await asyncio.gather(*jobs, return_exceptions=True)
+        ordered = sorted(candidates, key=lambda m: -scores.get(m["id"], 0.0))
+        trace["ordered_ids"] = [m["id"] for m in ordered]
+        return ordered

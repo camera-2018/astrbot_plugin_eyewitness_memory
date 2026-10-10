@@ -33,6 +33,7 @@ def test_registered_fields_defaults_and_native_provider_picker():
     defaults = {k: SCHEMA[k]["default"] for k in Settings.model_fields}
     assert Settings.model_validate(defaults) == Settings()
     assert SCHEMA["provider_id"]["_special"] == "select_provider"
+    assert SCHEMA["systemone_provider_id"]["_special"] == "select_provider"
     assert SCHEMA["embedding_provider_id"]["_special"] == "select_provider_embedding"
     assert SCHEMA["embedding_provider_id"]["options"] == [""]
     assert SCHEMA["qdrant_api_key"]["secret"]
@@ -110,10 +111,16 @@ async def test_panel_and_native_use_same_config_without_exposing_key(store):
     doc, status = await api.handle({"path": "settings"})
     assert status == 200 and "synthetic-secret" not in json.dumps(doc)
     doc["provider_id"] = "chosen-in-panel"
+    doc["systemone_provider_id"] = "gateway-in-panel"
+    doc["systemone_model"] = "jev-1.13.0"
+    doc["systemone_timeout"] = 6.0
     doc["qdrant_api_key"] = "synthetic-new-secret"
     saved, status = await api.handle({"path": "settings", "method": "PUT", "body": doc})
     assert status == 200 and "qdrant_api_key" not in saved
     assert config.persisted["provider_id"] == "chosen-in-panel"
+    assert config.persisted["systemone_provider_id"] == "gateway-in-panel"
+    assert config.persisted["systemone_model"] == "jev-1.13.0"
+    assert config.persisted["systemone_timeout"] == 6.0
     assert config.persisted["qdrant_api_key"] == "synthetic-new-secret"
     # Native save triggers plugin reload in AstrBot; bind the new config snapshot.
     config2 = NativeConfig(**{**config.persisted, "provider_id": "chosen-in-native"})

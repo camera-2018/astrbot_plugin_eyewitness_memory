@@ -18,6 +18,7 @@ from .eyewitness.engine import Engine
 from .eyewitness.errors import failure_detail
 from .eyewitness.generation import generate_once
 from .eyewitness.store import Store
+from .eyewitness.systemone import SystemOneClient
 from .eyewitness.usage import ModelReply
 from .eyewitness.vector import VectorIndex
 
@@ -31,11 +32,13 @@ class EyewitnessMemoryPlugin(Star):
         self.data_dir = Path(StarTools.get_data_dir(PLUGIN))
         self.data_dir.chmod(0o700)  # Protect SQLite and its WAL/SHM files.
         self.store = Store(self.data_dir / "memory.sqlite3")
+        self.systemone = SystemOneClient(self.context.get_provider_by_id)
         self.engine = Engine(
             self.store,
             self.generate,
             VectorIndex(self.embed, lambda: self.config.get("qdrant_api_key", "")),
             report=lambda message: logger.warning("群聊记忆 %s", message),
+            systemone=self.systemone.call,
         )
         self.admin = AdminAPI(self.store, self.engine, self.providers)
         self.ready = False
@@ -185,4 +188,5 @@ class EyewitnessMemoryPlugin(Star):
     async def terminate(self):
         self.ready = False
         await self.engine.close()
+        await self.systemone.close()
         await self.store.call("close")
