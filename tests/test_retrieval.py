@@ -110,8 +110,9 @@ async def test_followup_context_reaches_search_review_and_verifier(store, monkey
     result = await Engine(store, model).recall(
         SCOPE, "他后来怎么样了", "bob", conversation=contexts
     )
-    assert "alice 的绘画比赛" in searches[0]
-    assert "过期描述" not in searches[0]
+    assert searches[0] == "他后来怎么样了"
+    assert "alice 的绘画比赛" in searches[1]
+    assert all("过期描述" not in text for text in searches)
     assert result["injection"]
     for prompt in prompts:
         assert prompt["data"]["conversation"] == [{"role": "user", "text": "alice 的绘画比赛"}]
@@ -139,14 +140,28 @@ async def test_quoted_message_outside_recent_window_is_scope_bound(store):
 
 
 async def test_new_topic_does_not_expand_search_with_old_conversation(store, monkeypatch):
-    queries = []
+    mid, _ = await seed(store)
+    queries, prompts = [], []
+    original_search = store.search
 
     def search(scope, query):
         queries.append(query)
-        return []
+        return original_search(scope, query)
+
+    async def generate(provider, system, prompt):
+        prompts.append(json.loads(prompt)["data"])
+        return json.dumps(
+            {
+                "decisions": [
+                    {"id": mid, "action": "reject", "reason": "当前问天气，不应重新引入绘画话题"}
+                ]
+            }
+        )
 
     monkeypatch.setattr(store, "search", search)
-    await Engine(store, Model([])).recall(
+    result = await Engine(store, generate).recall(
         SCOPE, "今天天气怎么样", conversation=[{"role": "user", "content": "绘画比赛"}]
     )
-    assert queries == ["今天天气怎么样"]
+    assert queries == ["今天天气怎么样", "绘画比赛"]
+    assert prompts[0]["query"] == "今天天气怎么样"
+    assert not result["injection"]

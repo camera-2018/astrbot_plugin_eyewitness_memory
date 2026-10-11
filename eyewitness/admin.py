@@ -50,7 +50,7 @@ class AdminAPI:
                 "last_error": engine.last_error,
                 "last_cycle": engine.last_cycle,
                 "scopes": await store.call("list_scopes"),
-                "version": "0.1.19",
+                "version": "0.1.20",
             }
         if route == "providers" and method == "GET":
             return await self.providers() if self.providers else {"chat": [], "embedding": []}

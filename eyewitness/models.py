@@ -152,61 +152,20 @@ def safe_text(text: str, limit: int = 2000) -> str:
 
 
 def low_signal(text: str, has_reference: bool = False) -> bool:
+    """Only empty/non-text content; never classify the meaning of an utterance."""
     if has_reference:
         return False
     stripped = re.sub(r"\[[A-Za-z]+\]|[\s，。！？!?~～（）()]+", "", text)
-    return not stripped or stripped in {
-        "哈哈",
-        "哈哈哈",
-        "笑死",
-        "确实",
-        "好",
-        "嗯",
-        "哦",
-        "牛逼",
-        "草",
-        "嘻嘻",
-        "复读",
-        "收到",
-        "笑了",
-        "哭哭",
-        "还真是",
-        "呜呜",
-        "呜呜呜",
-        "难绷",
-        "666",
-        "何意味",
-        "好家伙",
-    }
+    return not any(char.isalnum() for char in stripped)
 
 
-EXTRACTION_ONLY_REACTIONS = {
-    "我去",
-    "不是",
-    "难绷",
-    "666",
-    "呜呜呜",
-    "何意味",
-    "还真是",
-    "隐忍",
-    "震惊瘫坐",
-    "哦牛批",
-    "不知道",
-    "好家伙",
-}
 EXTRACTION_MARKUP = re.compile(
     r"\[CQ:[^\]]+\]|\[At:[^\]]+\]|\[[A-Za-z]+\]|"
     r"@[^\s@()]{1,40}\(\d+\)|https?://\S+"
 )
-EXTRACTION_CONTENT = re.compile(r"[\u3400-\u9fffA-Za-z0-9]")
 
 
 def extraction_noise(text: str, has_reference: bool = False) -> bool:
-    """Skip obvious non-facts; keep the original row for source context."""
+    """Skip only contentless transport markup, never a word/intent category."""
     visible = EXTRACTION_MARKUP.sub("", text).strip()
-    if not EXTRACTION_CONTENT.search(visible):
-        return True
-    if low_signal(text, has_reference):
-        return True
-    plain = re.sub(r"[\s，。！？!?~～（）()…]+", "", visible)
-    return not has_reference and plain in EXTRACTION_ONLY_REACTIONS
+    return not any(char.isalnum() for char in visible)

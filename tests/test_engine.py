@@ -233,7 +233,7 @@ async def test_cross_group_review_cannot_select_foreign_memory(store):
 async def test_low_signal_and_scope_disabled_no_calls(store):
     model = Model([])
     engine = Engine(store, model)
-    assert not (await engine.recall(SCOPE, "哈哈"))["injection"]
+    assert not (await engine.recall(SCOPE, "🚀🚀"))["injection"]
     assert not (await engine.recall("default:GroupMessage:999", "绘画比赛"))["injection"]
     assert model.calls == 0
 

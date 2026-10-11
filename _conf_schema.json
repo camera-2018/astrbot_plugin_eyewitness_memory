@@ -19,6 +19,6 @@
   "trace_days": {"description": "召回记录保留（天）", "type": "int", "default": 7, "slider": {"min": 1, "max": 90, "step": 1}},
   "max_db_mb": {"description": "SQLite＋WAL 采集保护线（MiB）", "type": "int", "default": 512, "slider": {"min": 16, "max": 4096, "step": 1}},
   "injection_chars": {"description": "注入字符上限", "type": "int", "default": 8000, "slider": {"min": 200, "max": 16000, "step": 1}, "hint": "按字符计算，不等于 tokens。"},
-  "semantic_min_score": {"description": "纯语义候选最低分", "type": "float", "default": 0.55, "slider": {"min": 0.0, "max": 1.0, "step": 0.01}, "hint": "无具体关键词或明确人物匹配时，语义分数须达到此值才送模型核验。不是置信概率；更换向量模型后需重新观察。设为 0 可放开此筛选。"},
+  "semantic_min_score": {"description": "纯语义候选最低分", "type": "float", "default": 0.55, "slider": {"min": 0.0, "max": 1.0, "step": 0.01}, "hint": "没有当前消息/会话的文本匹配或明确人物匹配时，向量分数须达到此值才送模型核验。不用固定闲聊或回忆词表判断意图。分数不是置信概率；更换向量模型后需重新观察。设为 0 可放开此筛选。"},
   "config_version": {"description": "配置迁移版本", "type": "int", "default": 0, "invisible": true}
 }

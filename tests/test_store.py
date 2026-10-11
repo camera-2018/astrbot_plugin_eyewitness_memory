@@ -54,9 +54,7 @@ async def test_capture_idempotent_and_secret_redaction(store):
     assert len(rows) == 1 and "secret123" not in rows[0]["text"]
 
 
-@pytest.mark.parametrize(
-    "text", ["🚀🚀", "[Image]", "[CQ:image,file=foo]", "https://example.com", "哈哈", "我去"]
-)
+@pytest.mark.parametrize("text", ["🚀🚀", "[Image]", "[CQ:image,file=foo]", "https://example.com"])
 async def test_noise_remains_in_context_but_not_extraction_queue(store, text):
     mid = await store.call("capture", SCOPE, text, "u", "小明", text)
     row = (await store.call("source_rows", SCOPE, [mid]))[0]
@@ -65,7 +63,10 @@ async def test_noise_remains_in_context_but_not_extraction_queue(store, text):
     assert extraction_noise(text)
 
 
-@pytest.mark.parametrize("text", ["国企", "香芋味", "画风也很舒适", "我报名了摄影比赛"])
+@pytest.mark.parametrize(
+    "text",
+    ["国企", "香芋味", "画风也很舒适", "我报名了摄影比赛", "哈哈", "我去", "嗯", "はい", "α"],
+)
 async def test_short_meaningful_message_is_still_extractable(store, text):
     mid = await store.call("capture", SCOPE, text, "u", "小明", text)
     row = (await store.call("source_rows", SCOPE, [mid]))[0]
@@ -187,7 +188,8 @@ def test_settings_and_low_signal():
         Settings(allowed_scopes=["123"])
     with pytest.raises(ValidationError):
         Settings(collection="repeat_memory")
-    assert low_signal("哈哈")
+    assert low_signal("🚀🚀")
+    assert not low_signal("哈哈")
     assert not low_signal("后来呢", True)
     assert not low_signal("他之前的项目呢")
 

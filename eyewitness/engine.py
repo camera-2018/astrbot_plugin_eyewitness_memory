@@ -33,11 +33,7 @@ from .models import (
 from .retrieval import (
     compact_review,
     conversation_hint,
-    direct_operation,
-    followup_topic,
     merge_rankings,
-    needs_topic_context,
-    ordinary_chat_reason,
     rank_candidates,
 )
 from .store import Store
@@ -284,7 +280,7 @@ class Engine:
                 budget.reason or "无法安全估算本轮输入"
             )
         elif low_signal(query, bool(reply_id)):
-            result["reason"] = "低信息消息，无需长期记忆"
+            result["reason"] = "没有可检索的文字或引用"
         elif self.online.locked():
             result["reason"] = "记忆并发已满，跳过以保证正常回复"
         else:
@@ -408,45 +404,20 @@ class Engine:
     async def _recall(
         self, cfg, scope, query, sender_id, reply_id, visible, result, conversation, *, deadline
     ):
-        if not reply_id and direct_operation(query):
-            result["reason"] = "明确的即时操作指令，无历史指代，跳过长期记忆"
-            result["retrieval"] = {"reviewed_ids": [], "intent_skip": True}
-            return
-        subjects = await self.store.call("named_subjects", scope, query)
-        skipped_intent = ordinary_chat_reason(
-            query, has_subject=bool(subjects), has_quote=bool(reply_id)
-        )
-        if skipped_intent:
-            result["reason"] = "普通闲聊或通用问题，跳过长期记忆核验"
-            result["retrieval"] = {
-                "reviewed_ids": [],
-                "intent_skip": True,
-                "intent": skipped_intent,
-            }
-            return
-        recent = await self.store.call("recent", scope, 8)
         quoted = await self.store.call("referenced_message", scope, reply_id) if reply_id else None
-        # Context assists pronoun resolution; it is not blindly concatenated to every search.
-        search_query = query
-        if needs_topic_context(query):
-            topic = quoted["text"][:400] if quoted else followup_topic(conversation)
-            if not topic:
-                result["reason"] = "短消息缺少明确话题，跳过长期记忆"
-                result["retrieval"] = {"reviewed_ids": [], "intent_skip": True}
-                return
-            search_query += " " + topic
-        elif len(query) <= 40 and (
-            reply_id
-            or any(w in query for w in ("之前", "上次", "后来", "那个", "记得", "他", "她", "这事"))
-        ):
-            if quoted:
-                search_query += " " + quoted["text"][:400]
-            elif conversation:
-                search_query += " " + " ".join(r["text"][:200] for r in conversation[-2:])
-            else:
-                relevant = [r for r in recent if r["sender_id"] == sender_id]
-                search_query += " " + " ".join(r["text"][:120] for r in relevant[-3:])
+        # Only a real platform reference expands the current query. Session
+        # context is a separate recall branch, not an intent inferred from words.
+        search_query = query + (" " + quoted["text"][:400] if quoted else "")
+        context_query = " ".join(r["text"][:200] for r in conversation[-2:])
         lexical = await self.store.call("search", scope, search_query)
+        contextual = await self.store.call("search", scope, context_query) if context_query else []
+        subjects = await self.store.call("named_subjects", scope, search_query)
+        if context_query:
+            subjects = list(
+                dict.fromkeys(
+                    [*subjects, *await self.store.call("named_subjects", scope, context_query)]
+                )
+            )
         semantic = []
         if self.vector and self.vector.enabled(cfg):
             try:
@@ -460,20 +431,10 @@ class Engine:
             except Exception as exc:
                 result["vector_fallback"] = True
                 result["vector_error"] = failure_detail(exc)
-        if search_query != query:
-            subjects = list(
-                dict.fromkeys(
-                    [*subjects, *await self.store.call("named_subjects", scope, search_query)]
-                )
-            )
-        # Only an explicit self-reference adds the speaker; asking about someone
-        # else must not turn into a sender-only filter.
-        if sender_id and any(w in query for w in ("我的", "我之前", "我以前", "我上次")):
-            subjects = list(dict.fromkeys([*subjects, sender_id]))
         by_subject = await self.store.call("subject_memories", scope, subjects)
         candidates = [
             m
-            for m in merge_rankings(lexical, semantic, by_subject)
+            for m in merge_rankings(lexical, semantic, by_subject, contextual)
             if m["status"] == "active"
             and m["expires"] > time.time()
             and m["summary"] not in visible
@@ -493,7 +454,9 @@ class Engine:
             ):
                 continue
             filtered.append({**m, "sources": detail["sources"]})
-        ranked, skipped = rank_candidates(filtered, search_query, subjects, cfg.semantic_min_score)
+        ranked, skipped = rank_candidates(
+            filtered, search_query, subjects, cfg.semantic_min_score, context_query=context_query
+        )
         # Assemble one bounded evidence pool. Shared neighborhoods are sent once.
         # Remove low-ranked candidates if their mandatory sources cannot fit.
         candidates, contexts, pool = [], {}, []
@@ -517,6 +480,7 @@ class Engine:
         contexts = {mid: ids.intersection(available) for mid, ids in contexts.items()}
         result["retrieval"] = {
             "lexical": len(lexical),
+            "contextual": len(contextual),
             "semantic": len(semantic),
             "subject": len(by_subject),
             "eligible": len(filtered),

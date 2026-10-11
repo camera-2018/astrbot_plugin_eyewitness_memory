@@ -9,7 +9,7 @@ from eyewitness.engine import BASE, Engine
 from eyewitness.errors import AuxiliaryModelFailure
 from eyewitness.extraction import extraction_messages, pack_extraction
 from eyewitness.models import Extraction
-from eyewitness.retrieval import compact_review, direct_operation, merge_rankings
+from eyewitness.retrieval import compact_review, merge_rankings
 from eyewitness.usage import ModelReply
 from tests.conftest import OTHER, SCOPE, seed
 from tests.test_engine import Model, answers
@@ -21,25 +21,26 @@ async def pending(store, key, text, sender="alice", scope=SCOPE, reply="", offse
     )
 
 
-async def test_only_generic_overlap_does_not_call_llm(store):
-    await seed(store, text="我今天打算练习钢琴", summary="alice 今天计划练习钢琴")
-    model = Model([])
+async def test_shared_words_are_reviewed_without_a_handwritten_stopword_vocabulary(store):
+    mid, _ = await seed(store, text="我今天打算练习钢琴", summary="alice 今天计划练习钢琴")
+    model = Model([{"decisions": [{"id": mid, "action": "reject", "reason": "缺少具体关联"}]}])
     result = await Engine(store, model).recall(SCOPE, "今天怎么样")
-    assert not result["selected"] and model.calls == 0
-    assert result["retrieval"]["gate_skipped"]
-    assert "本地筛选" in result["reason"]
+    assert not result["selected"] and model.calls == 1
+    assert mid in result["retrieval"]["reviewed_ids"]
 
 
 @pytest.mark.parametrize("query", ["哭哭", "还真是", "，教我", "继续", "那怎么办"])
-async def test_reactions_and_topicless_followups_use_no_embedding_or_llm(store, query):
-    await seed(store)
+async def test_weak_matches_skip_review_but_not_the_embedding_based_on_utterance_shape(
+    store, query
+):
+    mid, _ = await seed(store)
 
     class Vector:
         def enabled(self, cfg):
             return True
 
         async def search(self, *args):
-            pytest.fail("A reaction or topicless followup must not contact embeddings")
+            return [{"id": mid, "score": 0.3, "payload": {"version": 1}}]
 
     model = Model([])
     result = await Engine(store, model, Vector()).recall(SCOPE, query)
@@ -55,7 +56,7 @@ async def test_short_followup_searches_current_topic_and_can_recall(store):
         conversation=[{"role": "assistant", "content": "我们聊的是绘画比赛的准备。"}],
     )
     assert result["injection"] and model.calls == 1
-    assert result["retrieval"]["expanded_query"]
+    assert result["retrieval"]["contextual"]
 
 
 async def test_followup_does_not_use_unrelated_group_recent_as_its_topic(store):
@@ -70,12 +71,14 @@ async def test_followup_does_not_use_unrelated_group_recent_as_its_topic(store):
     "query",
     ["打开电视", "睦头，把空调开到16度", "看看电视开了吗", "帮我打开浏览器", "把电视调到少儿频道"],
 )
-async def test_immediate_operations_use_no_model_even_with_matching_old_memory(store, query):
-    await seed(store, text="我喜欢大屏电视", summary="alice 喜欢大屏电视")
-    model = Model([])
+async def test_operation_requests_with_a_candidate_reach_model_review(store, query):
+    mid, _ = await seed(store, text=query, summary="alice 先前提过设备操作：" + query)
+    model = Model(
+        [{"decisions": [{"id": mid, "action": "reject", "reason": "本次操作不需要背景"}]}]
+    )
     result = await Engine(store, model).recall(SCOPE, query)
-    assert model.calls == 0 and not result["injection"]
-    assert result["retrieval"]["intent_skip"]
+    assert model.calls == 1 and not result["injection"]
+    assert mid in result["retrieval"]["reviewed_ids"]
 
 
 @pytest.mark.parametrize(
@@ -89,8 +92,21 @@ async def test_immediate_operations_use_no_model_even_with_matching_old_memory(s
         "我应该买什么显卡",
     ],
 )
-def test_person_background_and_history_dependent_commands_are_not_shortcut(query):
-    assert not direct_operation(query)
+async def test_background_and_history_requests_are_not_classified_by_a_command_vocabulary(
+    store, query
+):
+    mid, source = await seed(store)
+
+    class Vector:
+        def enabled(self, cfg):
+            return True
+
+        async def search(self, *args):
+            return [{"id": mid, "score": 0.9, "payload": {"version": 1}}]
+
+    model = Model(answers(mid, source))
+    result = await Engine(store, model, Vector()).recall(SCOPE, query)
+    assert result["injection"] and model.calls == 1
 
 
 async def test_weak_semantic_only_skips_but_synonym_above_floor_gets_one_review(store):
@@ -186,14 +202,14 @@ def test_fusion_preserves_both_retrieval_signals():
     assert record["lexical_score"] == -3 and record["semantic_score"] == 0.7
 
 
-async def test_reaction_and_unanswered_question_batch_uses_no_llm(store):
+async def test_text_batch_is_evaluated_by_model_not_a_question_or_reaction_vocabulary(store):
     ids = [
         await pending(store, str(i), text, offset=i)
         for i, text in enumerate(["你们在聊什么？", "要不要继续？", "谁知道啊", "太离谱了"])
     ]
-    model = Model([])
-    assert not await Engine(store, model).extract_once(await store.call("get_settings"))
-    assert model.calls == 0
+    model = Model([{"candidates": []}])
+    assert await Engine(store, model).extract_once(await store.call("get_settings"))
+    assert model.calls == 1
     assert all(r["processed"] == 1 for r in await store.call("source_rows", SCOPE, ids))
 
 
@@ -238,7 +254,9 @@ async def test_context_from_other_group_cannot_create_memory(store):
     answer = await pending(store, "answer", "香芋味", reply="question", offset=1)
     batch = await store.call("source_rows", SCOPE, [answer])
     assert await store.call("extraction_context", batch) == []
-    assert extraction_messages(batch, [], []) == []
+    assert [r["id"] for r in extraction_messages(batch, [], [])] == [answer]
+    foreign_rows = await store.call("source_rows", OTHER, [foreign])
+    assert [r["id"] for r in extraction_messages(batch, foreign_rows, [])] == [answer]
     assert foreign != answer
 
 
