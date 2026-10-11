@@ -20,6 +20,7 @@ from .context import (
 )
 from .errors import AuxiliaryModelFailure, failure_detail
 from .extraction import compact_message, pack_extraction
+from .json_output import parse_output
 from .models import (
     Extraction,
     GroundedReview,
@@ -36,6 +37,7 @@ from .retrieval import (
     followup_topic,
     merge_rankings,
     needs_topic_context,
+    ordinary_chat_reason,
     rank_candidates,
 )
 from .store import Store
@@ -134,7 +136,13 @@ class Engine:
             stripped = raw.strip()
             if stripped.startswith("```json") and stripped.endswith("```"):
                 stripped = stripped[7:-3].strip()
-            value = schema.model_validate_json(stripped)
+            value, ignored = parse_output(schema, stripped)
+            if ignored:
+                log.info(
+                    "Eyewitness Memory %s：兼容忽略 %d 个额外 JSON 字段；协议字段仍严格校验",
+                    stage,
+                    ignored,
+                )
             status = "success"
             return value
         except asyncio.CancelledError:
@@ -404,6 +412,18 @@ class Engine:
             result["reason"] = "明确的即时操作指令，无历史指代，跳过长期记忆"
             result["retrieval"] = {"reviewed_ids": [], "intent_skip": True}
             return
+        subjects = await self.store.call("named_subjects", scope, query)
+        skipped_intent = ordinary_chat_reason(
+            query, has_subject=bool(subjects), has_quote=bool(reply_id)
+        )
+        if skipped_intent:
+            result["reason"] = "普通闲聊或通用问题，跳过长期记忆核验"
+            result["retrieval"] = {
+                "reviewed_ids": [],
+                "intent_skip": True,
+                "intent": skipped_intent,
+            }
+            return
         recent = await self.store.call("recent", scope, 8)
         quoted = await self.store.call("referenced_message", scope, reply_id) if reply_id else None
         # Context assists pronoun resolution; it is not blindly concatenated to every search.
@@ -440,7 +460,12 @@ class Engine:
             except Exception as exc:
                 result["vector_fallback"] = True
                 result["vector_error"] = failure_detail(exc)
-        subjects = await self.store.call("named_subjects", scope, search_query)
+        if search_query != query:
+            subjects = list(
+                dict.fromkeys(
+                    [*subjects, *await self.store.call("named_subjects", scope, search_query)]
+                )
+            )
         # Only an explicit self-reference adds the speaker; asking about someone
         # else must not turn into a sender-only filter.
         if sender_id and any(w in query for w in ("我的", "我之前", "我以前", "我上次")):

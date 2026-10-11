@@ -43,6 +43,9 @@ async def check():
         def get_all_embedding_providers(self):
             return []
 
+        def get_provider_by_id(self, provider_id):
+            return None
+
         async def get_using_provider_async(self, umo):
             assert umo == Event.unified_msg_origin
             return types.SimpleNamespace(provider_config={"max_context_tokens": 8192})

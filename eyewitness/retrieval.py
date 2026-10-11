@@ -18,7 +18,7 @@ GENERIC_TERMS = set(
 )
 
 HISTORY_REFERENCE = re.compile(
-    r"之前|以前|上次|记得|记忆|历史|习惯|偏好|原来|那[个次台份]|照旧|平时|曾经"
+    r"之前|以前|上次|记得|记忆|历史|习惯|偏好|原来|那[个次台份]|照旧|平时|曾经|当时|后来|上回"
 )
 FOLLOWUP = re.compile(
     r"^(?:教我|教教我|教一下|怎么弄|怎么做|怎么学|咋弄|咋办|那怎么办|"
@@ -57,6 +57,64 @@ def direct_operation(query: str) -> bool:
     This does not gate person questions, recommendations or implicit topic recall.
     """
     return not HISTORY_REFERENCE.search(query) and bool(DIRECT_OPERATION.search(query))
+
+
+# These are deliberately narrow shapes, not a blanket "no history keyword"
+# filter: recommendations, person questions and concrete project discussions
+# remain eligible even when the user did not explicitly ask to remember.
+FEEDBACK = re.compile(
+    r"^(?:有道理|没道理|不是|确实如此|降智了|何意味|你闹麻了|你个[人入]机|"
+    r"说话|说点话|多说几句|别催我|别说了|少说点话)(?:[\W_]|啊|呀|呢|吧)*$",
+    re.IGNORECASE,
+)
+TEMPORARY_STATE = re.compile(
+    r"^我?(?:(?:好|很|太|有点)?(?:饿|热|冷|困|累|无聊)(?:了|啊|呀|呢|死了)?"
+    r"(?:也|又|还|而且|并且)?){1,5}$"
+)
+PRESENTATION = re.compile(
+    r"^(?:必须|全部|都|请|要|用)?(?:发|说|讲|回)?(?:语音|声音)(?:回复|回答|解释)?$"
+    r"|^你(?:可以|能|能不能|可不可以)发出.{0,30}(?:声|声音)(?:吗|么)?$"
+)
+REFERENTIAL = re.compile(r"他|她|它|[这那](?:台|件|份|次|个(?!群|词|字|人类))")
+BACKGROUND_REQUEST = re.compile(
+    r"推荐|适合我|我该买|我应该买|生日|项目|插件|仓库|代码|设备|服务器|进展|进度"
+)
+PERSONAL_REFERENCE = re.compile(r"我(?:的|喜欢|想|要|打算|准备|住|用|学|工作)")
+GENERAL_QUESTION = re.compile(
+    r"(?:是什么|是啥|什么意思)|^(?:什么|啥)(?:是|叫)"
+    r"|^(?:你)?(?:知道|了解|听说过).{0,60}(?:吗|么)(?:我问问)?$"
+    r"|^(?:人类|人们|大家)为什么"
+    r"|^(?:永远|总是|老是|一直)?(?:睡不醒|睡不着|犯困|无聊)(?:要|该)?(?:怎么办|咋办)$"
+)
+
+
+def ordinary_chat_reason(query: str, *, has_subject: bool = False, has_quote: bool = False) -> str:
+    """Skip obvious transient chatter/factual questions before paid retrieval.
+
+    A source-backed person name or explicit history reference always escapes.
+    General questions also escape when quoted or referring to a concrete prior
+    object, or asking about the speaker's own background. A quoted format
+    request may also refer to that topic. Pure feedback does not need a new
+    long-memory review, even when replying to a message.
+    """
+    if has_subject or HISTORY_REFERENCE.search(query):
+        return ""
+    plain = re.sub(r"[\s，,。.!！?？~～…、【】]+", "", query)
+    if FEEDBACK.fullmatch(plain):
+        return "feedback"
+    if TEMPORARY_STATE.fullmatch(plain):
+        return "temporary_state"
+    if not has_quote and PRESENTATION.search(plain):
+        return "presentation"
+    if (
+        not has_quote
+        and not REFERENTIAL.search(plain)
+        and not BACKGROUND_REQUEST.search(plain)
+        and not PERSONAL_REFERENCE.search(plain)
+    ):
+        if GENERAL_QUESTION.search(plain):
+            return "general_question"
+    return ""
 
 
 def compact_review(data):
