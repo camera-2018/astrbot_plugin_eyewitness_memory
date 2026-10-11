@@ -92,6 +92,10 @@ export type Settings = {
   qdrant_url: string;
   collection: string;
   online_timeout: number;
+  understanding_timeout: number;
+  query_expansion_limit: number;
+  candidate_pool_size: number;
+  source_review_limit: number;
   extraction_timeout: number;
   batch_size: number;
   batch_age_seconds: number;
@@ -108,6 +112,8 @@ export type Recall = {
   elapsed_ms?: number;
   vector_fallback?: boolean;
   vector_error?: string;
+  understanding?: { status: string; queries: string[]; reason?: string };
+  selection?: { status: string; pool_ids: string[]; selected: { id: string; reason: string }[]; reason?: string };
   systemone?: {
     model: string;
     status: string;

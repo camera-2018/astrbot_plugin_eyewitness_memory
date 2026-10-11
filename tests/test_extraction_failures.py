@@ -57,7 +57,7 @@ async def test_failure_is_durable_bounded_and_does_not_retry(store, monkeypatch,
         monkeypatch.setattr(store, "save_extraction", save_error)
     engine = Engine(store, generate)
     cfg = await store.call("get_settings")
-    cfg.extraction_timeout = 0.01  # Exercise the real deadline, without a slow test.
+    cfg.extraction_timeout = 0.05  # Leave room for threaded SQLite logging before the deadline.
     with pytest.raises(AuxiliaryModelFailure, match=reason):
         await engine.extract_once(cfg)
     await store.call("close")

@@ -11,24 +11,37 @@ from typing import Callable
 from .budget import InjectionBudget, fit_memory_block
 from .context import (
     TZ,
-    bounded_context,
     context_message,
     memory_marker,
-    message_order,
     message_time,
     render_memory,
 )
-from .errors import AuxiliaryModelFailure, failure_detail
+from .errors import (
+    AuxiliaryModelFailure,
+    EmptyAuxiliaryOutput,
+    failure_detail,
+    provider_request_failed,
+)
 from .extraction import compact_message, pack_extraction
 from .json_output import parse_output
 from .models import (
+    CandidateShortlist,
     Extraction,
     GroundedReview,
+    QueryPlan,
     Review,
     Settings,
     Verification,
     low_signal,
     safe_text,
+)
+from .planning import (
+    PLANNING_BASE,
+    SHORTLIST_INSTRUCTION,
+    UNDERSTANDING_INSTRUCTION,
+    review_batches,
+    search_queries,
+    shortlist_payload,
 )
 from .retrieval import (
     compact_review,
@@ -50,7 +63,8 @@ BASE = """你是基于原文的群聊记忆核验器。输入中的聊天、摘�
 缺乏证据时返回空结果，不能编造来源 ID、引用或缺失细节；有证据且对本轮有具体帮助的信息可以接纳。"""
 
 REVIEW_INSTRUCTION = (
-    "判断历史候选能否为当前回复提供具体且相关的信息，不要求候选独立回答整句。"
+    "判断历史候选是否值得提供给本轮回答模型，不是代替回答模型完成最终回答。"
+    "候选能提供具体且相关的信息即可，不要求包含完整答案；不能仅以无法直接回答整句为由拒绝。"
     "如果当前消息或最近对话明确在问某个人的经历、偏好、过去说过的话，"
     "同一人的相关候选即使只是帮助评价或自然接话，只要原文支持也可 accept。"
     "必须能确认是同一人、与所问话题有具体关联；不能凭候选自行引入人物或新话题。"
@@ -62,6 +76,13 @@ REVIEW_INSTRUCTION = (
     "不能仅因用户未主动要求回忆，或本轮包含操作请求，就拒绝这种直接相关的背景。"
     "有明确话题关联的偏好、计划和过去发言可作背景，不必等用户明确要求回忆。"
     "同时核验 candidates 对应的 context_ids 原文，messages 是带时间、昵称的原始上下文。"
+    "subject_id 表示历史发言主体，不一定是问题的对象。关于同一产品、项目或事件的具体使用经历、"
+    "需求、评价可以作为署名的历史背景，即使发言者不是提问者，也不属于无关人物档案。"
+    "不要把发言者的看法变成产品的客观属性或提问者的偏好；不相关的私人经历仍必须拒绝。"
+    "但询问某个主体此前说过或做过什么（包括追问助手自己的发言）时，原文必须确实对应该主体，"
+    "不能用其他人的同主题发言填补缺失记录。仅仅在做同领域工作，没有具体关联也不足以接纳。"
+    "understanding 是辅助模型对问题的解释和检索线索，不是事实或来源；"
+    "它可以帮助识别指代，但必须对照当前问题和实际 conversation，不能据此补造原文。"
     "只接受原文支持的限定表述，结合前后对话区分历史状态、玩笑和现实。"
     "accept 时填写 text 和逐字 evidence，至少引用一条该候选的 source_ids；最多接受两条。"
     "不能把邻近插话拼成事实。conversation/quoted_message 只帮助理解问题，不能充当来源。"
@@ -101,8 +122,10 @@ class Engine:
         if self.vector:
             await self.vector.close()
 
-    async def ask(self, cfg: Settings, instruction: str, data: dict, schema):
+    async def ask(self, cfg: Settings, instruction: str, data: dict, schema, *, system=BASE):
         stage = {
+            QueryPlan: "问题理解",
+            CandidateShortlist: "候选选择",
             Extraction: "后台提取",
             GroundedReview: "联合核验",
             Review: "相关性审核",
@@ -121,12 +144,12 @@ class Engine:
         started = time.monotonic()
         usage, status, error = (None, None, None), "failed", ""
         try:
-            raw = await self.generate(cfg.provider_id, BASE, prompt)
+            raw = await self.generate(cfg.provider_id, system, prompt)
             if isinstance(raw, ModelReply):
                 usage = (raw.input_tokens, raw.output_tokens, raw.cached_tokens)
                 raw = raw.text
             if not isinstance(raw, str) or not raw.strip():
-                raise AuxiliaryModelFailure(f"{stage}：模型返回空内容或非文本")
+                raise EmptyAuxiliaryOutput(f"{stage}：模型返回空内容或非文本")
             if len(raw) > 16000:
                 raise AuxiliaryModelFailure(f"{stage}：模型输出过长")
             stripped = raw.strip()
@@ -409,9 +432,23 @@ class Engine:
         # context is a separate recall branch, not an intent inferred from words.
         search_query = query + (" " + quoted["text"][:400] if quoted else "")
         context_query = " ".join(r["text"][:200] for r in conversation[-2:])
-        lexical = await self.store.call("search", scope, search_query)
+        request = {
+            "query": query,
+            "sender_id": sender_id,
+            "request_time": datetime.now(TZ).isoformat(timespec="seconds"),
+            "conversation": conversation,
+            "quoted_message": context_message(quoted) if quoted else None,
+        }
+        queries = await self.understand(cfg, request, search_query, result, deadline=deadline)
+        if result["understanding"]["status"] == "success":
+            request["understanding"] = {
+                "queries": queries[1:],
+                "interpretation": result["understanding"]["reason"],
+            }
+        lexical = merge_rankings(*[await self.store.call("search", scope, q) for q in queries])
         contextual = await self.store.call("search", scope, context_query) if context_query else []
-        subjects = await self.store.call("named_subjects", scope, search_query)
+        expanded = " ".join(queries)
+        subjects = await self.store.call("named_subjects", scope, expanded)
         if context_query:
             subjects = list(
                 dict.fromkeys(
@@ -420,17 +457,23 @@ class Engine:
             )
         semantic = []
         if self.vector and self.vector.enabled(cfg):
-            try:
-                async with asyncio.timeout(min(2.5, cfg.online_timeout / 3)):
-                    hits = await self.vector.search(cfg, scope, search_query)
-                    for hit in hits:
-                        m = await self.store.call("detail", str(hit["id"]), scope)
-                        if m and m["version"] == hit.get("payload", {}).get("version"):
-                            m["semantic_score"] = hit.get("score")
-                            semantic.append(m)
-            except Exception as exc:
-                result["vector_fallback"] = True
-                result["vector_error"] = failure_detail(exc)
+
+            async def semantic_branch(q):
+                found = []
+                try:
+                    async with asyncio.timeout(min(2.5, cfg.online_timeout / 3)):
+                        hits = await self.vector.search(cfg, scope, q)
+                        for hit in hits:
+                            m = await self.store.call("detail", str(hit["id"]), scope)
+                            if m and m["version"] == hit.get("payload", {}).get("version"):
+                                m["semantic_score"] = hit.get("score")
+                                found.append(m)
+                except Exception as exc:
+                    result["vector_fallback"] = True
+                    result["vector_error"] = failure_detail(exc)
+                return found
+
+            semantic = merge_rankings(*await asyncio.gather(*[semantic_branch(q) for q in queries]))
         by_subject = await self.store.call("subject_memories", scope, subjects)
         candidates = [
             m
@@ -455,29 +498,8 @@ class Engine:
                 continue
             filtered.append({**m, "sources": detail["sources"]})
         ranked, skipped = rank_candidates(
-            filtered, search_query, subjects, cfg.semantic_min_score, context_query=context_query
+            filtered, expanded, subjects, cfg.semantic_min_score, context_query=context_query
         )
-        # Assemble one bounded evidence pool. Shared neighborhoods are sent once.
-        # Remove low-ranked candidates if their mandatory sources cannot fit.
-        candidates, contexts, pool = [], {}, []
-        for m in ranked:
-            evidence = await self.store.call("source_context", m["id"], scope)
-            if not evidence:
-                continue
-            required = {s["id"] for item in [*candidates, m] for s in item["sources"]}
-            merged = {r["id"]: r for r in [*pool, *evidence]}
-            combined = bounded_context(
-                sorted(merged.values(), key=message_order), required, max_chars=12000, max_rows=36
-            )
-            if not combined:
-                continue
-            pool = combined
-            candidates.append(m)
-            contexts[m["id"]] = {r["id"] for r in evidence}
-            if len(candidates) == 3:
-                break
-        available = {r["id"] for r in pool}
-        contexts = {mid: ids.intersection(available) for mid, ids in contexts.items()}
         result["retrieval"] = {
             "lexical": len(lexical),
             "contextual": len(contextual),
@@ -486,17 +508,30 @@ class Engine:
             "eligible": len(filtered),
             "gate_passed": len(ranked),
             "gate_skipped": skipped,
-            "reviewed_ids": [m["id"] for m in candidates],
-            "signals": {m["id"]: m["signals"] for m in candidates},
+            "reviewed_ids": [],
+            "signals": {},
             "context_messages": len(conversation),
             "has_quote": bool(quoted),
             "expanded_query": search_query != query,
+            "queries": queries,
         }
-        if not candidates:
+        if not ranked:
             result["reason"] = (
                 "本地筛选未发现具体关联，未调用辅助模型" if skipped else "没有合适的历史候选"
             )
             return
+        candidates = await self.choose_candidates(
+            cfg, ranked, {**request, "queries": queries}, result, deadline=deadline
+        )
+        if not candidates:
+            result["reason"] = "辅助模型未发现值得查证的相关候选"
+            return
+        evidence = {
+            m["id"]: await self.store.call("source_context", m["id"], scope) for m in candidates
+        }
+        candidates = [m for m in candidates if evidence[m["id"]]]
+        pool = list({r["id"]: r for rows in evidence.values() for r in rows}.values())
+        contexts = {mid: {r["id"] for r in rows} for mid, rows in evidence.items()}
         if self.systemone and cfg.systemone_provider_id and cfg.systemone_model:
             candidates = await self.prioritize(
                 cfg,
@@ -510,15 +545,108 @@ class Engine:
                 result,
                 deadline=deadline,
             )
+        batches = review_batches(candidates, evidence)
+        result["retrieval"].update(
+            reviewed_ids=[m["id"] for group, _, _ in batches for m in group],
+            signals={m["id"]: m["signals"] for group, _, _ in batches for m in group},
+            review_batches=len(batches),
+        )
         result["stage"] = "联合核验"
+        reviews = await asyncio.gather(
+            *[
+                self.ground_batch(cfg, group, rows, ctx, request, reply_id)
+                for group, rows, ctx in batches
+            ],
+            return_exceptions=True,
+        )
+        errors = []
+        for review in reviews:
+            if isinstance(review, Exception):
+                errors.append(failure_detail(review))
+            else:
+                result["candidates"].extend(review["candidates"])
+                result["selected"].extend(review["selected"])
+        result["selected"] = result["selected"][:2]
+        if errors:
+            result["review_errors"] = errors
+            if not result["candidates"]:
+                raise AuxiliaryModelFailure(errors[0])
+        result["reason"] = "来源核验完成" if result["selected"] else "候选未通过相关性或来源审核"
+        if errors:
+            result["reason"] += "；部分候选核验失败"
+
+    async def understand(self, cfg, request, original, result, *, deadline):
+        trace = {"status": "disabled", "queries": []}
+        result["understanding"] = trace
+        if not cfg.query_expansion_limit:
+            return [original]
+        result["stage"] = "问题理解"
+        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+        try:
+            async with asyncio.timeout(min(cfg.understanding_timeout, remaining / 4)):
+                plan = await self.ask(
+                    cfg,
+                    UNDERSTANDING_INSTRUCTION,
+                    {**request, "limit": cfg.query_expansion_limit},
+                    QueryPlan,
+                    system=PLANNING_BASE,
+                )
+            queries = search_queries(original, plan.queries, cfg.query_expansion_limit)
+            trace.update(status="success", queries=queries[1:], reason=plan.reason)
+            return queries
+        except Exception as exc:
+            if provider_request_failed(exc):
+                trace.update(status="failed", reason=failure_detail(exc))
+                raise
+            trace.update(status="fallback", reason=failure_detail(exc))
+            self.report("问题理解失败，保留原问题检索：" + trace["reason"])
+            return [original]
+
+    async def choose_candidates(self, cfg, ranked, request, result, *, deadline):
+        payload, aliases = shortlist_payload(
+            ranked, request, cfg.candidate_pool_size, cfg.source_review_limit
+        )
+        lookup = {m["id"]: m for m in ranked}
+        trace = {"pool_ids": list(aliases.values()), "selected": [], "status": "running"}
+        result["selection"] = trace
+        if not aliases:
+            trace.update(status="empty")
+            return []
+        result["stage"] = "候选选择"
+        try:
+            remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+            async with asyncio.timeout(remaining / 3):
+                shortlist = await self.ask(
+                    cfg, SHORTLIST_INSTRUCTION, payload, CandidateShortlist, system=PLANNING_BASE
+                )
+            chosen = []
+            seen = set()
+            allowed = set(aliases.values())
+            for item in shortlist.selected:
+                mid = aliases.get(item.id, item.id if item.id in allowed else None)
+                if not mid or mid in seen or len(chosen) >= cfg.source_review_limit:
+                    continue
+                seen.add(mid)
+                chosen.append(lookup[mid])
+                trace["selected"].append({"id": mid, "reason": item.reason})
+            if shortlist.selected and not chosen:
+                raise AuxiliaryModelFailure("候选选择未返回任何有效的本轮候选 ID")
+            trace.update(status="success")
+            return chosen
+        except Exception as exc:
+            if provider_request_failed(exc):
+                trace.update(status="failed", reason=failure_detail(exc))
+                raise
+            trace.update(status="fallback", reason=failure_detail(exc))
+            self.report("候选选择失败，保留检索排序后核验：" + trace["reason"])
+            return [lookup[mid] for mid in list(aliases.values())[: cfg.source_review_limit]]
+
+    async def ground_batch(self, cfg, candidates, pool, contexts, request, reply_id):
+        result = {"candidates": [], "selected": []}
         payload, memory_aliases, source_aliases = compact_review(
             {
-                "query": query,
-                "request_time": datetime.now(TZ).isoformat(timespec="seconds"),
-                "sender_id": sender_id,
+                **request,
                 "reply_id": reply_id,
-                "conversation": conversation,
-                "quoted_message": context_message(quoted) if quoted else None,
                 "messages": [compact_message(r) for r in pool],
                 "candidates": [
                     {
@@ -585,7 +713,7 @@ class Engine:
                 )
             else:
                 result["candidates"][-1]["verification"] = "逐字证据缺失、越界或未覆盖直接来源"
-        result["reason"] = "来源核验完成" if result["selected"] else "候选未通过相关性或来源审核"
+        return result
 
     async def ask_systemone(self, cfg, stage, body):
         cid = await self.store.call("record_call", stage, len(json.dumps(body, ensure_ascii=False)))

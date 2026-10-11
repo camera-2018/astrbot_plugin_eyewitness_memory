@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 from pydantic import ValidationError
 
-from eyewitness.errors import failure_detail
+from eyewitness.errors import AuxiliaryModelFailure, failure_detail, provider_request_failed
 from eyewitness.models import EvidenceRef, Review, Verification
 
 
@@ -21,6 +21,30 @@ def test_diagnostic_classifies_missing_field():
 
 def test_single_character_evidence_is_valid():
     assert EvidenceRef(message_id="message-1", quote="X").quote == "X"
+
+
+def test_http_rejection_is_detected_in_a_safe_wrapper_without_matching_error_words():
+    class Error(Exception):
+        status_code = 429
+
+    wrapper = AuxiliaryModelFailure("display-only text")
+    wrapper.__cause__ = Error("private provider body")
+    assert provider_request_failed(wrapper)
+    assert not provider_request_failed(ValueError("HTTP 429 token text is not a protocol status"))
+
+
+def test_cyclic_failure_causes_do_not_loop():
+    first, second = ValueError(), ValueError()
+    first.__cause__, second.__cause__ = second, first
+    assert not provider_request_failed(first)
+
+
+def test_native_empty_output_error_is_a_typed_failure_not_a_text_heuristic():
+    class EmptyModelOutputError(Exception):
+        pass
+
+    assert provider_request_failed(EmptyModelOutputError("private body"))
+    assert not provider_request_failed(ValueError("EmptyModelOutputError"))
 
 
 def test_diagnostic_includes_invalid_field_location():

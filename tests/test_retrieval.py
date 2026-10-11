@@ -4,7 +4,7 @@ import json
 from eyewitness.engine import Engine
 from eyewitness.retrieval import conversation_hint, merge_rankings
 from tests.conftest import OTHER, SCOPE, seed
-from tests.test_engine import Model, answers
+from tests.test_engine import Model, answers, planning_passthrough
 
 
 def test_context_is_bounded_and_excludes_injected_memory_and_non_chat_content():
@@ -102,6 +102,7 @@ async def test_followup_context_reaches_search_review_and_verifier(store, monkey
 
     monkeypatch.setattr(store, "search", search)
 
+    @planning_passthrough
     async def model(provider, system, prompt):
         prompts.append(json.loads(prompt))
         return json.dumps(responses.pop(0), ensure_ascii=False)
@@ -127,6 +128,7 @@ async def test_quoted_message_outside_recent_window_is_scope_bound(store):
     responses = answers(target, source)
     prompts = []
 
+    @planning_passthrough
     async def model(provider, system, prompt):
         prompts.append(json.loads(prompt))
         return json.dumps(responses.pop(0))
@@ -148,6 +150,7 @@ async def test_new_topic_does_not_expand_search_with_old_conversation(store, mon
         queries.append(query)
         return original_search(scope, query)
 
+    @planning_passthrough
     async def generate(provider, system, prompt):
         prompts.append(json.loads(prompt)["data"])
         return json.dumps(

@@ -560,6 +560,20 @@ function RecallResult({ result }: { result: Recall }) {
           向量检索已回退到关键词检索：{result.vector_error || "原因未知"}
         </div>
       )}
+      {result.understanding && (
+        <details className="memory-card text-sm">
+          <summary>问题理解 · {result.understanding.status}</summary>
+          <p className="subtle mt-3">{result.understanding.reason || "原问题始终独立检索，补充线索不是事实。"}</p>
+          {result.understanding.queries.map((query, i) => <p className="mt-2" key={i}>{query}</p>)}
+        </details>
+      )}
+      {result.selection && (
+        <details className="memory-card text-sm">
+          <summary>候选选择 · {result.selection.pool_ids.length} 条摘要 · {result.selection.status}</summary>
+          {result.selection.reason && <p className="subtle mt-3">{result.selection.reason}</p>}
+          {result.selection.selected.map((item) => <p className="subtle mt-2" key={item.id}>{item.id.slice(0, 8)} · {item.reason}</p>)}
+        </details>
+      )}
       {result.systemone && (
         <details className="memory-card text-sm">
           <summary>System One 候选排序 · {result.systemone.model} · {result.systemone.status}</summary>
@@ -1044,6 +1058,10 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
             {(
               [
                 ["online_timeout", "单次在线时间预算（秒）", 0.5, 30, 0.5],
+                ["understanding_timeout", "问题理解时间上限（秒）", 0.5, 15, 0.5],
+                ["query_expansion_limit", "补充检索线索上限（0 关闭）", 0, 4, 1],
+                ["candidate_pool_size", "送辅助模型选择的候选池上限", 3, 48, 1],
+                ["source_review_limit", "单轮原文核验候选上限", 1, 12, 1],
                 ["extraction_timeout", "后台提取超时（秒）", 5, 180, 1],
                 ["batch_size", "后台每批送审新消息上限", 5, 100, 1],
                 ["batch_age_seconds", "未满批次最长等待（秒）", 60, 86400, 1],

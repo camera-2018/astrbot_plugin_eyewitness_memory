@@ -12,8 +12,31 @@ class AuxiliaryModelFailure(Exception):
     """A safe-to-display explanation of one auxiliary model failure."""
 
 
+class EmptyAuxiliaryOutput(AuxiliaryModelFailure):
+    """No model result exists; don't call later phases as an implicit retry."""
+
+
 class RetryConflict(ValueError):
     """A manual retry refers to an outdated or unavailable failed batch."""
+
+
+def provider_request_failed(exc: Exception) -> bool:
+    """Don't turn a rejection/empty response into later calls on the same provider."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, EmptyAuxiliaryOutput) or type(exc).__name__ == "EmptyModelOutputError":
+            return True
+        response = getattr(exc, "response", None)
+        statuses = (
+            getattr(exc, "status_code", None),
+            getattr(exc, "status", None),
+            getattr(response, "status_code", None),
+        )
+        if any(type(status) is int and 400 <= status <= 599 for status in statuses):
+            return True
+        exc = exc.__cause__
+    return False
 
 
 def upstream_category(exc: Exception) -> str:

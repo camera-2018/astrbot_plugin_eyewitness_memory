@@ -104,6 +104,25 @@ test("stale settings do not overwrite another editor", async ({ page }) => {
   await expect(page.getByRole("status")).toHaveText("设置已保存");
 });
 
+test("wide-recall settings persist through the same native configuration bridge", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  const fields = [
+    ["问题理解时间上限（秒）", "7"],
+    ["补充检索线索上限（0 关闭）", "2"],
+    ["送辅助模型选择的候选池上限", "30"],
+    ["单轮原文核验候选上限", "8"],
+  ];
+  for (const [label, value] of fields) await page.getByLabel(label, { exact: true }).fill(value);
+  await page.getByRole("button", { name: "保存设置", exact: true }).click();
+  await expect(page.getByRole("status")).toHaveText("设置已保存");
+  await page.reload();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  for (const [label, value] of fields) await expect(page.getByLabel(label, { exact: true })).toHaveValue(value);
+  const persisted = await page.evaluate(async () => window.AstrBotPluginPage!.apiPost("api", { path: "settings" }));
+  expect(persisted).toMatchObject({ understanding_timeout: 7, query_expansion_limit: 2, candidate_pool_size: 30, source_review_limit: 8 });
+});
+
 test("mobile navigation and screenshot", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");

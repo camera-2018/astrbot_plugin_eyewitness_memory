@@ -107,6 +107,12 @@ def merge_rankings(*rankings: list[dict]) -> list[dict]:
             if mid in seen:
                 continue
             seen.add(mid)
-            records[mid] = {**records.get(mid, {}), **item}
+            previous = records.get(mid, {})
+            merged = {**previous, **item}
+            semantic = [r.get("semantic_score") for r in (previous, item)]
+            scores_present = [s for s in semantic if isinstance(s, (int, float))]
+            if scores_present:
+                merged["semantic_score"] = max(scores_present)
+            records[mid] = merged
             scores[mid] = scores.get(mid, 0) + 1 / (60 + rank)
     return [records[mid] for mid in sorted(records, key=lambda mid: -scores[mid])]

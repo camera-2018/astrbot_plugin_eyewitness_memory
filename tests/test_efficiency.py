@@ -12,7 +12,7 @@ from eyewitness.models import Extraction
 from eyewitness.retrieval import compact_review, merge_rankings
 from eyewitness.usage import ModelReply
 from tests.conftest import OTHER, SCOPE, seed
-from tests.test_engine import Model, answers
+from tests.test_engine import Model, answers, planning_passthrough
 
 
 async def pending(store, key, text, sender="alice", scope=SCOPE, reply="", offset=0):
@@ -149,13 +149,14 @@ async def test_contextual_birthday_background_is_not_gated_as_non_history_query(
     assert model.calls == 1 and target in result["retrieval"]["reviewed_ids"]
 
 
-async def test_top_three_share_one_grounded_call_and_two_selections_max(store):
+async def test_wide_selection_splits_into_grounded_batches_and_two_injections_max(store):
     for i in range(8):
         await seed(
             store, sender=f"user{i}", text=f"我报名绘画比赛第{i}组", summary=f"绘画比赛第{i}组"
         )
     prompts = []
 
+    @planning_passthrough
     async def generate(provider, system, prompt):
         data = json.loads(prompt)["data"]
         prompts.append(data)
@@ -181,9 +182,11 @@ async def test_top_three_share_one_grounded_call_and_two_selections_max(store):
         )
 
     result = await Engine(store, generate).recall(SCOPE, "绘画比赛报名情况")
-    assert len(prompts) == 1 and len(prompts[0]["candidates"]) == 3
+    assert len(prompts) == 2 and all(len(p["candidates"]) == 3 for p in prompts)
+    assert len(result["selection"]["pool_ids"]) == 8
+    assert len(result["retrieval"]["reviewed_ids"]) == 6
     assert len(result["selected"]) == 2
-    assert len({m["id"] for m in prompts[0]["messages"]}) == len(prompts[0]["messages"])
+    assert all(len({m["id"] for m in p["messages"]}) == len(p["messages"]) for p in prompts)
 
 
 async def test_neighbor_quote_alone_cannot_substitute_for_direct_source(store):
@@ -221,6 +224,7 @@ async def test_short_answer_keeps_previous_batch_question_and_attributes_source(
     answer = await pending(store, "answer", "香芋味", reply="question" if reply else "", offset=1)
     prompts = []
 
+    @planning_passthrough
     async def generate(provider, system, prompt):
         data = json.loads(prompt)["data"]
         prompts.append(data)
@@ -384,6 +388,7 @@ def test_request_aliases_are_lossless_without_mutating_or_renumbering_history():
 async def test_alias_response_is_resolved_before_injection(store):
     mid, source = await seed(store)
 
+    @planning_passthrough
     async def generate(provider, system, prompt):
         data = json.loads(prompt)["data"]
         candidate = data["candidates"][0]

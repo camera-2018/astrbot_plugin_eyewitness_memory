@@ -5,7 +5,7 @@ import pytest
 from eyewitness.engine import Engine
 from eyewitness.models import extraction_noise, low_signal
 from tests.conftest import SCOPE, seed
-from tests.test_engine import Model, answers
+from tests.test_engine import Model, answers, planning_passthrough
 
 
 @pytest.mark.parametrize(
@@ -73,6 +73,7 @@ async def test_model_can_reject_a_casual_response_after_reading_its_context(stor
     mid, _ = await seed(store)
     prompts = []
 
+    @planning_passthrough
     async def generate(provider, system, prompt):
         data = json.loads(prompt)["data"]
         prompts.append(data)

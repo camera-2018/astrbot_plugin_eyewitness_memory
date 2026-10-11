@@ -5,11 +5,15 @@ import json
 import os
 import tempfile
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 
 from aiohttp import web
 
+from eyewitness.engine import Engine
 from eyewitness.generation import generate_once
+from eyewitness.models import Candidate, Settings
+from eyewitness.store import Store
 from eyewitness.usage import ModelReply
 
 
@@ -39,8 +43,16 @@ async def exercise():
         assert "request_max_retries" not in payload and "max_retries" not in payload
         assert payload["model"] == "retry-test"
         assert payload["metadata"] == {"source": "retry-check"}
-        calls[prompt] += 1
-        status = {"limited": 429, "unavailable": 503}.get(prompt, 200)
+        key = prompt
+        if prompt.startswith("{"):
+            key = json.loads(prompt)["data"]["query"].split()[-1]
+        calls[key] += 1
+        status = {
+            "limited": 429,
+            "unavailable": 503,
+            "guard-limited": 429,
+            "guard-unavailable": 503,
+        }.get(key, 200)
         if prompt == "normal" and calls[prompt] < 3:
             status = 503
         if prompt == "cancel":
@@ -60,7 +72,10 @@ async def exercise():
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "ok"},
+                        "message": {
+                            "role": "assistant",
+                            "content": "" if key == "guard-empty" else "ok",
+                        },
                         "finish_reason": "stop",
                     }
                 ],
@@ -99,6 +114,49 @@ async def exercise():
                 raise AssertionError("Expected synthetic error")
             assert calls[prompt] == 1, dict(calls)
         print("PASS: 429/503 each issue one real HTTP request, even with two API keys")
+
+        with tempfile.TemporaryDirectory(prefix="eyewitness-phase-guard-") as root:
+            store = Store(Path(root) / "synthetic.sqlite3")
+            await store.call("open")
+            try:
+                scope = "test:GroupMessage:100"
+                await store.call(
+                    "save_settings",
+                    Settings(mode="active", allowed_scopes=[scope], provider_id="retry-test"),
+                )
+                text = "我准备参加绘画比赛"
+                mid = await store.call("capture", scope, "synthetic-1", "alice", "Alice", text)
+                rows = await store.call("source_rows", scope, [mid])
+                await store.call(
+                    "save_extraction",
+                    rows,
+                    [
+                        Candidate(
+                            summary=text,
+                            kind="goal",
+                            subject_id="alice",
+                            stance="self_report",
+                            evidence=[{"message_id": mid, "quote": text}],
+                        )
+                    ],
+                )
+
+                async def generate(pid, system, prompt):
+                    return ModelReply.from_response(
+                        await generate_once(context, pid, system, prompt)
+                    )
+
+                engine = Engine(store, generate, report=lambda _: None)
+                for key in ("guard-limited", "guard-unavailable", "guard-empty"):
+                    result = await engine.recall(scope, "绘画比赛 " + key)
+                    assert calls[key] == 1, dict(calls)
+                    assert result["understanding"]["status"] == "failed", result
+                    assert not result["injection"] and not result.get("selection"), result
+                print(
+                    "PASS: entire recall stops after one HTTP 429/503 or empty response; no phase retries"
+                )
+            finally:
+                await store.call("close")
 
         memory, normal = await asyncio.gather(
             generate_once(context, "retry-test", "synthetic system", "memory"),

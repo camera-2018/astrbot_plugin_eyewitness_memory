@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -19,7 +19,11 @@ class Settings(BaseModel):
     systemone_timeout: float = Field(default=3.0, ge=0.2, le=10)
     qdrant_url: str = ""
     collection: str = "eyewitness_memory_v1"
-    online_timeout: float = Field(default=3.0, ge=0.5, le=30)
+    online_timeout: float = Field(default=30.0, ge=0.5, le=30)
+    understanding_timeout: float = Field(default=8.0, ge=0.5, le=15)
+    query_expansion_limit: int = Field(default=3, ge=0, le=4)
+    candidate_pool_size: int = Field(default=24, ge=3, le=48)
+    source_review_limit: int = Field(default=6, ge=1, le=12)
     extraction_timeout: float = Field(default=60.0, ge=5, le=180)
     batch_size: int = Field(default=80, ge=5, le=100)
     batch_age_seconds: int = Field(default=900, ge=60, le=86400)
@@ -127,6 +131,23 @@ class GroundedDecision(BaseModel):
 class GroundedReview(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     decisions: list[GroundedDecision] = Field(default_factory=list, max_length=3)
+
+
+class QueryPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    queries: list[Annotated[str, Field(min_length=1, max_length=400)]] = Field(max_length=4)
+    reason: str = Field(max_length=400)
+
+
+class ShortlistItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    id: str
+    reason: str = Field(max_length=300)
+
+
+class CandidateShortlist(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    selected: list[ShortlistItem] = Field(max_length=12)
 
 
 def terms(text: str) -> list[str]:

@@ -1,10 +1,35 @@
 import asyncio
 import json
 import time
+from functools import wraps
 
 from eyewitness.budget import InjectionBudget
 from eyewitness.engine import Engine
 from tests.conftest import OTHER, SCOPE, seed
+
+
+def planning_passthrough(model):
+    """Supply valid planning fixtures; these legacy tests focus on grounding."""
+
+    @wraps(model)
+    async def wrapped(*args):
+        body = json.loads(args[-1])
+        stage = body["schema"]["title"]
+        if stage == "QueryPlan":
+            return json.dumps({"queries": [], "reason": "测试中保留原问题"})
+        if stage == "CandidateShortlist":
+            data = body["data"]
+            return json.dumps(
+                {
+                    "selected": [
+                        {"id": m["id"], "reason": "测试中查原文"}
+                        for m in data["candidates"][: data["limit"]]
+                    ]
+                }
+            )
+        return await model(*args)
+
+    return wrapped
 
 
 class Model:
@@ -12,6 +37,7 @@ class Model:
         self.answers = list(answers)
         self.calls = 0
 
+    @planning_passthrough
     async def __call__(self, *args):
         self.calls += 1
         value = self.answers.pop(0)
@@ -53,6 +79,7 @@ async def test_person_question_review_can_continue_to_source_verification(store)
     responses = answers(mid, source)
     prompts = []
 
+    @planning_passthrough
     async def model(provider, system, prompt):
         prompts.append(json.loads(prompt))
         return json.dumps(responses.pop(0), ensure_ascii=False)
@@ -73,6 +100,7 @@ async def test_raw_context_reaches_verifier_and_main_model(store):
     responses = answers(mid, source)
     prompts = []
 
+    @planning_passthrough
     async def model(provider, system, prompt):
         prompts.append(json.loads(prompt))
         return json.dumps(responses.pop(0))
@@ -146,6 +174,7 @@ async def test_context_subject_erased_during_verification_cannot_leak(store):
     await store.call("capture", SCOPE, "private-neighbor", "bob", "B", "不应泄露的邻近消息")
     responses = answers(mid, source)
 
+    @planning_passthrough
     async def model(*args):
         if len(responses) == 1:
             await store.call("erase_subject", SCOPE, "bob")
@@ -267,6 +296,7 @@ async def test_timeout_does_not_escape(store):
     cfg.online_timeout = 0.5
     await store.call("save_settings", cfg)
 
+    @planning_passthrough
     async def slow(*args):
         await asyncio.sleep(5)
         return "{}"
@@ -279,6 +309,7 @@ async def test_edit_during_verification_invalidates_result(store):
     mid, source = await seed(store)
     responses = answers(mid, source)
 
+    @planning_passthrough
     async def model(*args):
         if len(responses) == 1:
             await store.call("edit", mid, 1, "alice 已经放弃绘画比赛计划", "disabled")
@@ -292,6 +323,7 @@ async def test_delete_during_verification_does_not_recreate_private_trace(store)
     mid, source = await seed(store)
     responses = answers(mid, source)
 
+    @planning_passthrough
     async def model(*args):
         if len(responses) == 1:
             await store.call("delete", mid)
@@ -319,6 +351,7 @@ async def test_upstream_status_diagnostic_does_not_leak_exception_text(store):
     class UpstreamError(Exception):
         status_code = 429
 
+    @planning_passthrough
     async def model(*args):
         raise UpstreamError("sk-test-very-private-provider-key")
 
@@ -332,6 +365,7 @@ async def test_upstream_status_diagnostic_does_not_leak_exception_text(store):
 async def test_empty_model_output_gives_specific_reason(store):
     await seed(store)
 
+    @planning_passthrough
     async def model(*args):
         return ""
 
@@ -348,7 +382,7 @@ async def test_recall_continues_after_old_daily_limit(store):
     result = await Engine(store, model).recall(SCOPE, "绘画比赛")
     assert result["reason"] == "候选未通过相关性或来源审核"
     assert model.calls == 1
-    assert (await store.call("stats"))["calls_today"] == 201
+    assert (await store.call("stats"))["calls_today"] == 203
 
 
 async def test_background_extraction_failure_skips_batch_and_allows_next_group(store):

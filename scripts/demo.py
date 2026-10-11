@@ -70,7 +70,19 @@ async def run(port: int):
         )
 
         async def generate(provider, system, prompt):
-            data = json.loads(prompt)["data"]
+            request = json.loads(prompt)
+            data = request["data"]
+            if request["schema"]["title"] == "QueryPlan":
+                return json.dumps({"queries": [], "reason": "演示：保留原问题检索"})
+            if request["schema"]["title"] == "CandidateShortlist":
+                return json.dumps(
+                    {
+                        "selected": [
+                            {"id": m["id"], "reason": "演示：待查原文"}
+                            for m in data["candidates"][: data["limit"]]
+                        ]
+                    }
+                )
             if "candidates" in data:
                 candidate = data["candidates"][0]
                 source = next(m for m in data["messages"] if m["id"] in candidate["source_ids"])

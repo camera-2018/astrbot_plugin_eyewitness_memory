@@ -114,6 +114,10 @@ async def test_panel_and_native_use_same_config_without_exposing_key(store):
     doc["systemone_provider_id"] = "gateway-in-panel"
     doc["systemone_model"] = "jev-1.13.0"
     doc["systemone_timeout"] = 6.0
+    doc["query_expansion_limit"] = 2
+    doc["understanding_timeout"] = 7.0
+    doc["candidate_pool_size"] = 30
+    doc["source_review_limit"] = 8
     doc["qdrant_api_key"] = "synthetic-new-secret"
     saved, status = await api.handle({"path": "settings", "method": "PUT", "body": doc})
     assert status == 200 and "qdrant_api_key" not in saved
@@ -121,6 +125,10 @@ async def test_panel_and_native_use_same_config_without_exposing_key(store):
     assert config.persisted["systemone_provider_id"] == "gateway-in-panel"
     assert config.persisted["systemone_model"] == "jev-1.13.0"
     assert config.persisted["systemone_timeout"] == 6.0
+    assert config.persisted["query_expansion_limit"] == 2
+    assert config.persisted["understanding_timeout"] == 7.0
+    assert config.persisted["candidate_pool_size"] == 30
+    assert config.persisted["source_review_limit"] == 8
     assert config.persisted["qdrant_api_key"] == "synthetic-new-secret"
     # Native save triggers plugin reload in AstrBot; bind the new config snapshot.
     config2 = NativeConfig(**{**config.persisted, "provider_id": "chosen-in-native"})
