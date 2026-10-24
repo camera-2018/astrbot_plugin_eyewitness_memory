@@ -13,6 +13,7 @@ from typing import Any
 from .config import ConfigSettings, settings_revision
 from .context import bounded_context, context_message, message_order, message_time, platform_time
 from .errors import AuxiliaryModelFailure, RetryConflict
+from .evidence import source_quote
 from .models import Candidate, Settings, extraction_noise, safe_text, terms
 
 
@@ -426,6 +427,21 @@ class Store:
                     continue
                 if not any(e.message_id in batch_ids for e in c.evidence):
                     continue  # Context alone must not repeatedly create old memories.
+                restored = [
+                    source_quote(rows[e.message_id]["text"], e.quote)
+                    if e.message_id in rows
+                    else None
+                    for e in c.evidence
+                ]
+                if all(q is not None for q in restored):
+                    c = c.model_copy(
+                        update={
+                            "evidence": [
+                                e.model_copy(update={"quote": q})
+                                for e, q in zip(c.evidence, restored)
+                            ]
+                        }
+                    )
                 if any(
                     e.message_id not in rows or e.quote not in rows[e.message_id]["text"]
                     for e in c.evidence

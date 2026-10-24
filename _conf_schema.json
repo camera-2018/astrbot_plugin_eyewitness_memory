@@ -3,6 +3,7 @@
   "allowed_scopes": {"description": "允许记录的群", "type": "list", "default": [], "hint": "填写完整会话标识，例如 default:GroupMessage:123456，不是单独群号。"},
   "bot_ids": {"description": "其他机器人 ID", "type": "list", "default": [], "hint": "不采集这些账号的消息。"},
   "provider_id": {"description": "辅助模型", "type": "string", "default": "", "_special": "select_provider", "hint": "用于提取、问题理解、候选选择和原文核验，需要支持 JSON 输出。"},
+  "json_mode": {"description": "请求 JSON 对象输出", "type": "bool", "default": false, "hint": "仅用于已验证支持 response_format=json_object 的 OpenAI Chat Completion 渠道。只影响记忆请求，同时使用 temperature=0；不支持时关闭。"},
   "embedding_provider_id": {"description": "Embedding 模型（可选）", "type": "string", "default": "", "_special": "select_provider_embedding", "options": [""], "hint": "候选来自 AstrBot 已配置的向量模型。留空仅使用关键词检索；新增提供方后重载本插件刷新候选。"},
   "systemone_provider_id": {"description": "System One 提供方（可选）", "type": "string", "default": "", "_special": "select_provider", "hint": "只复用所选提供方的地址与密钥，不调用它的聊天模型。留空关闭；用于候选排序，不直接接受或丢弃记忆。"},
   "systemone_model": {"description": "System One 模型名", "type": "string", "default": "", "hint": "如 jev-1.13.0、clef-flash。必须是上述提供方支持的 System One 模型；不是聊天模型。"},

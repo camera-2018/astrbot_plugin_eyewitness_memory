@@ -89,7 +89,7 @@ async def test_compatible_reply_is_one_successful_call_with_real_usage_and_safe_
     row = store.db.execute("SELECT * FROM model_calls").fetchone()
     assert row["status"] == "success" and row["input_tokens"] == 100 and row["output_tokens"] == 9
     assert row["error"] == ""
-    assert "兼容忽略 1 个" in caplog.text and "private-provider-body" not in caplog.text
+    assert "规范化 1 个" in caplog.text and "private-provider-body" not in caplog.text
     assert store.db.execute("SELECT count(*) FROM model_calls").fetchone()[0] == 1
 
 

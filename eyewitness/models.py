@@ -12,6 +12,7 @@ class Settings(BaseModel):
     allowed_scopes: list[str] = Field(default_factory=list, max_length=100)
     bot_ids: list[str] = Field(default_factory=list, max_length=500)
     provider_id: str = ""
+    json_mode: bool = False
     embedding_provider_id: str = ""
     systemone_provider_id: str = ""
     systemone_model: str = ""

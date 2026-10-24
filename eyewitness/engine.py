@@ -22,6 +22,7 @@ from .errors import (
     failure_detail,
     provider_request_failed,
 )
+from .evidence import source_quote
 from .extraction import compact_message, pack_extraction
 from .json_output import parse_output
 from .models import (
@@ -87,6 +88,12 @@ REVIEW_INSTRUCTION = (
     "accept 时填写 text 和逐字 evidence，至少引用一条该候选的 source_ids；最多接受两条。"
     "不能把邻近插话拼成事实。conversation/quoted_message 只帮助理解问题，不能充当来源。"
     "原文不足、主体不明或无实际帮助就 reject；拒绝时不必填写 text/evidence。"
+    "先明确本轮要回答的具体对象和需求，再判断候选是否能改变或补充这个回答。"
+    "只有一个称呼、感叹或泛词且上下文无具体需求时，不用同词历史故事填充回复。"
+    "例如孤立的‘妈妈’不等于在问某人的家庭往事；不能由候选反推用户的意图。"
+    "但有明确对象的‘喝什么’可采用该对象的饮品偏好，不按句子长短拒绝。"
+    "每条 reason 用一句话且不超过80字；evidence.quote 从对应原文复制连续片段，"
+    "换行在 JSON 中写成 \\n，不把多行改写成一句，不添加省略号。"
 )
 
 
@@ -158,7 +165,7 @@ class Engine:
             value, ignored = parse_output(schema, stripped)
             if ignored:
                 log.info(
-                    "Eyewitness Memory %s：兼容忽略 %d 个额外 JSON 字段；协议字段仍严格校验",
+                    "Eyewitness Memory %s：规范化 %d 个额外字段或过长解释；事实字段仍严格校验",
                     stage,
                     ignored,
                 )
@@ -197,7 +204,9 @@ class Engine:
                     cfg,
                     "提取值得日后回顾的偏好、目标、事件、约定。避免调侃、命令、临时情绪、敏感信息。"
                     "必须绑定 subject_id 和逐字 evidence；事件摘要写明时间。连续短句可合并但不同话题不能混合。"
-                    "无法判断是否认真陈述时 stance=uncertain。最多8条，可以为空。",
+                    "无法判断是否认真陈述时 stance=uncertain。最多8条，可以为空。"
+                    '必须返回对象 {"candidates": [...]}，无记忆时返回 {"candidates": []}。'
+                    "quote 复制原文连续片段，保留换行，不改写或拼接。",
                     {"messages": [compact_message(r) for r in useful]},
                     Extraction,
                 ),
@@ -688,6 +697,21 @@ class Engine:
                 if r["id"] in contexts[d.id]
             ]
             source_map = {r["id"]: r for r in evidence}
+            restored = [
+                source_quote(source_map[e.message_id]["text"], e.quote)
+                if e.message_id in source_map
+                else None
+                for e in d.evidence
+            ]
+            if restored and all(q is not None for q in restored):
+                d = d.model_copy(
+                    update={
+                        "evidence": [
+                            e.model_copy(update={"quote": q}) for e, q in zip(d.evidence, restored)
+                        ]
+                    }
+                )
+                result["candidates"][-1] = d.model_dump()
             if (
                 d.text
                 and d.evidence

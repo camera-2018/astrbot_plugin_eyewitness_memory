@@ -70,7 +70,13 @@ class EyewitnessMemoryPlugin(Star):
             raise
 
     async def generate(self, provider_id: str, system: str, prompt: str) -> ModelReply:
-        response = await generate_once(self.context, provider_id, system, prompt)
+        response = await generate_once(
+            self.context,
+            provider_id,
+            system,
+            prompt,
+            json_mode=self.config.get("json_mode", False),
+        )
         return ModelReply.from_response(response)
 
     async def embed(self, provider_id: str, text: str):
