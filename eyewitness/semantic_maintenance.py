@@ -62,8 +62,13 @@ def budget_status(store, cfg, now=None):
     return {
         "targets_used": targets,
         "calls_used": calls,
-        "targets_remaining": max(0, cfg.maintenance_review_limit - targets),
-        "calls_remaining": max(0, (cfg.maintenance_review_limit + 7) // 8 - calls),
+        "unlimited": cfg.maintenance_review_limit == 0,
+        "targets_remaining": None
+        if cfg.maintenance_review_limit == 0
+        else max(0, cfg.maintenance_review_limit - targets),
+        "calls_remaining": None
+        if cfg.maintenance_review_limit == 0
+        else max(0, (cfg.maintenance_review_limit + 7) // 8 - calls),
     }
 
 
@@ -79,7 +84,10 @@ def reserve(store, cfg, snapshot):
             raise ValueError("整理配置或数据权限已变化")
         used = budget_status(store, cfg)
         count = len(snapshot["targets"])
-        if not count or count > used["targets_remaining"] or not used["calls_remaining"]:
+        if not 1 <= count <= 8 or (
+            not used["unlimited"]
+            and (count > used["targets_remaining"] or not used["calls_remaining"])
+        ):
             return False
         store.db.execute(
             "INSERT INTO memory_semantic_budget(created,targets) VALUES(?,?)", (time.time(), count)
@@ -137,7 +145,45 @@ def _eligible_record(record, cfg, now):
     )
 
 
-def prepare(store, cfg, limit=8, excluded=()):
+def _candidate_snapshot(store, cfg, now):
+    """Freeze IDs and versions, not mutable OFFSETs or an ever-growing live query."""
+    marks = ",".join("?" for _ in cfg.allowed_scopes)
+    rows = store.db.execute(
+        f"SELECT m.id,m.version,m.scope,c.version AS checked_version,c.checked_at "
+        f"FROM memories m LEFT JOIN memory_semantic_checks c ON c.memory_id=m.id "
+        f"WHERE m.scope IN ({marks}) AND m.status='active' AND m.expires>? "
+        "ORDER BY COALESCE(c.checked_at,0),m.created,m.id",
+        [*cfg.allowed_scopes, now],
+    ).fetchall()
+    return {
+        "epoch": store.epoch(),
+        "settings": cfg.model_dump(),
+        "targets": [
+            {"id": r["id"], "version": r["version"], "scope": r["scope"]}
+            for r in rows
+            if r["checked_version"] != r["version"] or r["checked_at"] < now - 7 * 86400
+        ],
+        "reference_versions": {r["id"]: r["version"] for r in rows},
+    }
+
+
+def candidate_snapshot(store, cfg):
+    """A finite cohort for one run; later additions/edits wait for the next run."""
+    if (
+        cfg.mode != "active"
+        or not cfg.maintenance_enabled
+        or not cfg.maintenance_semantic_enabled
+        or not cfg.allowed_scopes
+    ):
+        return None
+    with transaction(store.db):
+        if store.get_settings().model_dump() != cfg.model_dump():
+            return None
+        ensure_schema(store.db)
+        return _candidate_snapshot(store, cfg, time.time())
+
+
+def prepare(store, cfg, limit=8, excluded=(), run=None):
     """Snapshot on the Store's serialized DB worker, before any model await."""
     if cfg.mode != "active" or not cfg.maintenance_enabled or not cfg.maintenance_semantic_enabled:
         return None
@@ -149,29 +195,36 @@ def prepare(store, cfg, limit=8, excluded=()):
         if store.get_settings().model_dump() != cfg.model_dump():
             return None
         ensure_schema(store.db)
+        if run is not None and (
+            run["settings"] != cfg.model_dump() or run["epoch"] != store.epoch()
+        ):
+            raise ValueError("本轮整理配置或数据权限已变化")
         budget = budget_status(store, cfg, now)
-        limit = min(limit, budget["targets_remaining"])
-        if limit <= 0 or budget["calls_remaining"] <= 0:
+        if not budget["unlimited"]:
+            limit = min(limit, budget["targets_remaining"])
+        if limit <= 0 or (not budget["unlimited"] and budget["calls_remaining"] <= 0):
             return None
-        marks = ",".join("?" for _ in allowed)
-        rows = store.db.execute(
-            f"SELECT m.* FROM memories m LEFT JOIN memory_semantic_checks c ON c.memory_id=m.id "
-            f"WHERE m.scope IN ({marks}) AND m.status='active' AND m.expires>? "
-            "AND (c.memory_id IS NULL OR c.version<>m.version OR c.checked_at<?) "
-            "ORDER BY COALESCE(c.checked_at,0),m.created,m.id LIMIT 1024",
-            [*allowed, now, now - 7 * 86400],
-        ).fetchall()
+        run = run if run is not None else _candidate_snapshot(store, cfg, now)
         excluded = set(excluded)
-        rows = [r for r in rows if r["id"] not in excluded]
+        rows = [r for r in run["targets"] if r["id"] not in excluded]
         if not rows:
             return None
         scope = None
-        records, targets = {}, []
+        records, targets, consumed = {}, [], []
         for row in rows:
-            if (scope is not None and row["scope"] != scope) or len(targets) >= min(8, limit):
+            if len(targets) >= min(8, limit):
+                break
+            if scope is not None and row["scope"] != scope:
                 continue
             record = _record(store, row["id"])
-            if not _eligible_record(record, cfg, now):
+            if (
+                not _eligible_record(record, cfg, now)
+                or record["memory"]["version"] != row["version"]
+            ):
+                consumed.append(row["id"])
+                continue
+            if len(json.dumps({row["id"]: record}, ensure_ascii=False)) > 18000:
+                consumed.append(row["id"])
                 continue
             trial = {**records, row["id"]: record}
             if len(json.dumps(trial, ensure_ascii=False)) > 18000:
@@ -179,6 +232,7 @@ def prepare(store, cfg, limit=8, excluded=()):
             records = trial
             scope = row["scope"]
             targets.append(row["id"])
+            consumed.append(row["id"])
         if not targets:
             return None
         for mid in targets:
@@ -192,7 +246,9 @@ def prepare(store, cfg, limit=8, excluded=()):
                 if ref["id"] in records:
                     continue
                 record = _record(store, ref["id"])
-                if not _eligible_record(record, cfg, now):
+                if not _eligible_record(record, cfg, now) or (
+                    run["reference_versions"].get(ref["id"]) != record["memory"]["version"]
+                ):
                     continue
                 trial = {**records, ref["id"]: record}
                 if len(trial) <= 16 and len(json.dumps(trial, ensure_ascii=False)) <= 24000:
@@ -234,6 +290,7 @@ def prepare(store, cfg, limit=8, excluded=()):
             "scope": scope,
             "settings": cfg.model_dump(),
             "targets": targets,
+            "consumed": consumed,
             "records": records,
             "payload": {"scope": scope, "targets": targets, "memories": payload},
         }

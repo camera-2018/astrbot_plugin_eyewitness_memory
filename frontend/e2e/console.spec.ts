@@ -225,7 +225,7 @@ test("maintenance settings and same-group aliases persist without dropping exist
   await page.getByLabel("定时整理", { exact: true }).selectOption("true");
   await page.getByLabel("整理间隔（小时）", { exact: true }).fill("24");
   await page.getByLabel("语义复核", { exact: true }).selectOption("true");
-  await page.getByLabel("每 24 小时语义复核最多条数", { exact: true }).fill("16");
+  await page.getByLabel("每日语义复核上限（0 不限）", { exact: true }).fill("16");
   await page.getByLabel("单批语义复核超时（秒）", { exact: true }).fill("30");
   await page.getByLabel("同一群的会话映射", { exact: true }).fill("\n  official:GroupMessage:new=demo:GroupMessage:10001  \n\n");
   await expect(page.getByText("映射会复用群记忆，但不会映射用户身份", { exact: false })).toBeVisible();
@@ -235,12 +235,30 @@ test("maintenance settings and same-group aliases persist without dropping exist
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await expect(page.getByLabel("定时整理", { exact: true })).toHaveValue("true");
   await expect(page.getByLabel("语义复核", { exact: true })).toHaveValue("true");
-  await expect(page.getByLabel("每 24 小时语义复核最多条数", { exact: true })).toHaveValue("16");
+  await expect(page.getByLabel("每日语义复核上限（0 不限）", { exact: true })).toHaveValue("16");
   await expect(page.getByLabel("同一群的会话映射", { exact: true })).toHaveValue("official:GroupMessage:new=demo:GroupMessage:10001");
   const saved = await page.evaluate(async () => window.AstrBotPluginPage!.apiPost("api", { path: "settings" })) as Record<string, unknown>;
   expect(saved).toMatchObject({ maintenance_enabled: true, maintenance_interval_hours: 24, maintenance_semantic_enabled: true, maintenance_review_limit: 16, maintenance_timeout: 30 });
   expect(saved.json_mode).toEqual(original.json_mode);
   expect(saved.systemone_check_support).toEqual(original.systemone_check_support);
+  await page.evaluate(async original => {
+    const bridge = window.AstrBotPluginPage!;
+    const latest = await bridge.apiPost("api", { path: "settings" }) as Record<string, unknown>;
+    await bridge.apiPost("api", { path: "settings", method: "PUT", body: { ...original, revision: latest.revision } });
+  }, original);
+});
+
+test("zero maintenance limit persists and displays unlimited without starting model work", async ({ page }) => {
+  await page.goto("/");
+  const original = await page.evaluate(async () => window.AstrBotPluginPage!.apiPost("api", { path: "settings" })) as Record<string, unknown>;
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByLabel("每日语义复核上限（0 不限）", { exact: true }).fill("0");
+  await page.getByRole("button", { name: "保存设置", exact: true }).click();
+  await expect(page.getByRole("status")).toHaveText("设置已保存");
+  await page.reload();
+  await expect(page.getByText("不设每日总量上限", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await expect(page.getByLabel("每日语义复核上限（0 不限）", { exact: true })).toHaveValue("0");
   await page.evaluate(async original => {
     const bridge = window.AstrBotPluginPage!;
     const latest = await bridge.apiPost("api", { path: "settings" }) as Record<string, unknown>;

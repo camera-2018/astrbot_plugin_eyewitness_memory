@@ -152,6 +152,7 @@ function MaintenanceCard({ state, active, refresh }: {
       上次整理：{state.last_success ? date(state.last_success) : "尚未运行"}<br />
       下次整理：{!state.enabled ? "未启用" : state.next_due ? date(state.next_due) : "等待后台排期"}
     </p>
+    {state.semantic_budget && <p className="subtle text-sm">语义整理：{state.semantic_budget.unlimited ? "不设每日总量上限" : `本日剩余 ${state.semantic_budget.targets_remaining} 条`} · 最近 24 小时已送审 {state.semantic_budget.targets_used} 条、调用 {state.semantic_budget.calls_used} 次</p>}
     {state.last_run && <p className="text-sm">最近扫描 {state.last_run.scanned} 条 · 停用 {state.last_run.counts.disabled || 0} 条 · 退回核验 {state.last_run.counts.demoted_to_pending || 0} 条</p>}
     {state.latest?.semantic && <p className="text-sm">最近语义复核 {state.latest.semantic.reviewed} 条 · 停用 {state.latest.semantic.forgotten} 条 · 歧义保留 {state.latest.semantic.uncertain} 条 · 模型调用 {state.latest.semantic.calls} 次</p>}
     {state.latest?.semantic_error && <p className="notice">语义复核未完成：{state.latest.semantic_error}</p>}
@@ -1158,8 +1159,8 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
                 <option value="true">开启：使用当前辅助模型复核</option>
               </select>
             </Field>
-            <Field title="每 24 小时语义复核最多条数" hint="默认连续 24 小时最多 32 条和 4 次请求；立即执行、失败和重启共用限额。">
-              <Input aria-label="每 24 小时语义复核最多条数" type="number" min={1} max={128} step={1} required
+            <Field title="每日语义复核上限（0 不限）" hint="填 0 不限制每日总量。仍每批最多 8 条、串行处理，同一版本 7 天内不重复审查。">
+              <Input aria-label="每日语义复核上限（0 不限）" type="number" min={0} max={128} step={1} required
                 value={cfg.maintenance_review_limit ?? 32}
                 onChange={(e) => patch("maintenance_review_limit", Number(e.target.value))} />
             </Field>

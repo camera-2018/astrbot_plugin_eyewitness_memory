@@ -161,12 +161,11 @@ class Engine:
         self.worker_task = asyncio.create_task(self.worker(), name="eyewitness-memory-worker")
 
     async def close(self):
-        if self.maintenance_task:
-            self.maintenance_task.cancel()
-            await asyncio.gather(self.maintenance_task, return_exceptions=True)
-        if self.worker_task:
-            self.worker_task.cancel()
-            await asyncio.gather(self.worker_task, return_exceptions=True)
+        tasks = [t for t in (self.maintenance_task, self.worker_task) if t is not None]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         if self.vector:
             await self.vector.close()
 
@@ -299,13 +298,13 @@ class Engine:
         if indexed and not failed and not self._failed_index_jobs:
             self._clear_error("index")
 
-    def start_maintenance(self):
+    def start_maintenance(self, *, force=True):
         if self.maintenance_lock.locked() or (
             self.maintenance_task and not self.maintenance_task.done()
         ):
             return False
         self.maintenance_task = asyncio.create_task(
-            self.maintenance_once(force=True), name="eyewitness-memory-maintenance"
+            self.maintenance_once(force=force), name="eyewitness-memory-maintenance"
         )
         return True
 
@@ -329,13 +328,20 @@ class Engine:
                 if cfg.maintenance_semantic_enabled:
                     if not cfg.provider_id:
                         raise AuxiliaryModelFailure("未配置用于整理的辅助模型")
-                    # No retries: at most ceil(limit / 8) calls in one scheduled run.
-                    for _ in range((cfg.maintenance_review_limit + 7) // 8):
-                        remaining = cfg.maintenance_review_limit - len(seen)
+                    run = await self.store.call("semantic_maintenance_candidates")
+                    if run and run["settings"] != cfg.model_dump():
+                        raise AuxiliaryModelFailure("整理配置已变化，未调用模型")
+                    # A finite frozen cohort; no daily cap when zero, and no retries.
+                    while run and len(seen) < len(run["targets"]):
+                        remaining = (
+                            cfg.maintenance_review_limit - semantic["reviewed"]
+                            if cfg.maintenance_review_limit
+                            else 8
+                        )
                         if remaining <= 0:
                             break
                         snapshot = await self.store.call(
-                            "prepare_semantic_maintenance", min(8, remaining), sorted(seen)
+                            "prepare_semantic_maintenance", min(8, remaining), sorted(seen), run
                         )
                         if not snapshot:
                             break
@@ -355,7 +361,7 @@ class Engine:
                         semantic["reviewed"] += applied["reviewed"]
                         semantic["forgotten"] += len(applied["forgotten"])
                         semantic["uncertain"] += len(applied["uncertain"])
-                        seen.update(snapshot["targets"])
+                        seen.update(snapshot["consumed"])
                 self._clear_error("maintenance")
                 return result
             except Exception as exc:
@@ -382,7 +388,7 @@ class Engine:
                                 self._clear_error("extraction")
                     await self.index_once(cfg)
                     if cfg.maintenance_enabled:
-                        await self.maintenance_once()
+                        self.start_maintenance(force=False)
                 self.last_cycle = time.time()
                 self._clear_error("worker")
             except Exception as exc:

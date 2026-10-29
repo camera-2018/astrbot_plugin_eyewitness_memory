@@ -59,6 +59,10 @@ export type MaintenanceResult = {
   decisions: { id: string; code: string; reason: string; to_status: string }[];
 };
 export type MaintenanceStatus = {
+  semantic_budget?: {
+    unlimited: boolean; targets_used: number; calls_used: number;
+    targets_remaining: number | null; calls_remaining: number | null;
+  };
   enabled: boolean;
   interval_hours: number;
   next_due: number | null;

@@ -38,7 +38,7 @@ class Settings(BaseModel):
     maintenance_enabled: bool = False
     maintenance_interval_hours: int = Field(default=24, ge=1, le=720)
     maintenance_semantic_enabled: bool = False
-    maintenance_review_limit: int = Field(default=32, ge=1, le=128)
+    maintenance_review_limit: int = Field(default=32, ge=0, le=128)
     maintenance_timeout: float = Field(default=45.0, ge=5, le=120)
 
     @field_validator("scope_aliases")

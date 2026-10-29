@@ -55,7 +55,7 @@ class AdminAPI:
                     "latest": engine.last_maintenance,
                 },
                 "scopes": await store.call("list_scopes"),
-                "version": "0.1.26",
+                "version": "0.1.27",
             }
         if route == "maintenance/preview" and method == "GET":
             return await store.call("run_maintenance", force=True, dry_run=True)

@@ -270,20 +270,21 @@
     "hint": "首次启用从当前时间开始计时；重启保留下一次执行时间。"
   },
   "maintenance_semantic_enabled": {
-    "description": "限量语义整理",
+    "description": "语义整理",
     "type": "bool",
     "default": false,
     "hint": "使用当前辅助模型判断低价值、重复及被后来明确纠正的记忆；需逐字来源支持，歧义保留。会产生模型用量；原文和停用前版本保留。"
   },
   "maintenance_review_limit": {
-    "description": "每 24 小时语义整理最多记忆数",
+    "description": "每日语义复核上限（0 不限）",
     "type": "int",
     "default": 32,
     "slider": {
-      "min": 1,
+      "min": 0,
       "max": 128,
       "step": 1
-    }
+    },
+    "hint": "0 表示不设每日总条数和调用次数上限。仍每批最多8条、串行处理；同一版本7天内不重复审查。"
   },
   "maintenance_timeout": {
     "description": "单次整理模型超时（秒）",

@@ -879,10 +879,15 @@ class Store:
             return {"status": "disabled"}
         return run(self, cfg, force=force, dry_run=dry_run)
 
-    def prepare_semantic_maintenance(self, limit=8, excluded=()):
+    def semantic_maintenance_candidates(self):
+        from .semantic_maintenance import candidate_snapshot
+
+        return candidate_snapshot(self, self.get_settings())
+
+    def prepare_semantic_maintenance(self, limit=8, excluded=(), run=None):
         from .semantic_maintenance import prepare
 
-        return prepare(self, self.get_settings(), limit, excluded)
+        return prepare(self, self.get_settings(), limit, excluded, run)
 
     def apply_semantic_maintenance(self, snapshot, review):
         from .semantic_maintenance import apply
