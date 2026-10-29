@@ -13,6 +13,8 @@ INSTRUCTION = """定期整理群聊记忆，只判断哪些记忆应停止参与
 targets才可决定forget，references仅供对照。必须按scope及subject_id区分不同群和不同人。
 稳定偏好、真实经历、仍有价值的约定不能因过去没召回、说得短或旧而删除。
 low_value仅用于明显的临时接梗/重复附和/角色扮演被误记成现实事实/没有可回顾意义的临时状态。
+low_value不能用于self_report；本人的明确经历、偏好、计划或约定不由模型主观评价其价值。
+对self_report认为价值较低时只标uncertain保留；有明确同人对照的duplicate或superseded才可停用。
 superseded只用于同一个人后来明确否认、更正、取消或替代了这条说法，不能把不同时间的两次经历当矛盾。
 duplicate只用于同人同群同一事实，不同日期的独立事件不是重复。
 forget必须给逐字evidence；low_value引用目标自己的来源；superseded和duplicate必须填写related_id，
@@ -314,7 +316,7 @@ def apply(store, cfg, snapshot, review):
                         )
                         sources.update({s["id"]: s for s in related["sources"]})
                 else:
-                    valid = valid and not decision.related_id
+                    valid = valid and not decision.related_id and m["stance"] != "self_report"
                 valid = (
                     valid
                     and bool(decision.evidence)
@@ -338,7 +340,12 @@ def apply(store, cfg, snapshot, review):
                     store.db.execute("INSERT OR REPLACE INTO outbox(memory_id) VALUES(?)", (mid,))
                     forgotten.append(mid)
                 else:
-                    action, reason = "uncertain", "缺少同人同群的有效对照与逐字证据；" + reason
+                    protection = (
+                        "本人的明确陈述不能仅凭价值评价自动遗忘；"
+                        if decision.category == "low_value" and m["stance"] == "self_report"
+                        else "缺少同人同群的有效对照与逐字证据；"
+                    )
+                    action, reason = "uncertain", protection + reason
             if action == "uncertain":
                 uncertain.append(mid)
             version = m["version"] + (mid in forgotten)

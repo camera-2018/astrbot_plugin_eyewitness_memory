@@ -266,7 +266,7 @@ async def test_context_added_after_snapshot_cancels_the_review(store):
 
 async def test_forget_is_soft_and_keeps_original_versions_sources_and_expiry(store):
     cfg = await enable(store)
-    mid, source = await add_memory(store)
+    mid, source = await add_memory(store, stance="hearsay")
     snap = prepare(store, cfg)
     before = original_data(store, mid, source)
     result = apply(store, cfg, snap, review(decision(mid, source)))
@@ -485,12 +485,13 @@ async def test_superseded_requires_later_original_source_time(store, newer):
 
 async def test_replacement_proposed_for_forgetting_cannot_delete_both_memories(store):
     cfg = await enable(store)
-    mid, source = await add_memory(store, sent_at=time.time() - 100)
+    mid, source = await add_memory(store, stance="hearsay", sent_at=time.time() - 100)
     other, other_source = await add_memory(
         store,
         text="我现在不喜欢红色键盘了",
         summary="alice 不再喜欢红色键盘",
         sent_at=time.time() - 50,
+        stance="hearsay",
     )
     snap = prepare(store, cfg)
     result = apply(
@@ -575,7 +576,7 @@ async def test_keep_and_missing_decision_change_only_review_checkpoint(store):
 
 async def test_version_write_failure_rolls_back_disable_and_audit(store, monkeypatch):
     cfg = await enable(store)
-    mid, source = await add_memory(store)
+    mid, source = await add_memory(store, stance="hearsay")
     snap = prepare(store, cfg)
     before = original_data(store, mid, source)
 
@@ -591,7 +592,7 @@ async def test_version_write_failure_rolls_back_disable_and_audit(store, monkeyp
 
 async def test_configuration_change_at_commit_boundary_rolls_back_everything(store, monkeypatch):
     cfg = await enable(store)
-    mid, source = await add_memory(store)
+    mid, source = await add_memory(store, stance="hearsay")
     snap = prepare(store, cfg)
     before = original_data(store, mid, source)
     calls = 0
@@ -609,7 +610,7 @@ async def test_configuration_change_at_commit_boundary_rolls_back_everything(sto
 
 async def test_concurrent_replay_only_one_transaction_can_disable(store):
     cfg = await enable(store)
-    mid, source = await add_memory(store)
+    mid, source = await add_memory(store, stance="hearsay")
     snap = prepare(store, cfg)
     second = Store(store.path)
     second.db = sqlite3.connect(store.path, timeout=5, check_same_thread=False)
@@ -631,3 +632,21 @@ async def test_concurrent_replay_only_one_transaction_can_disable(store):
         )
     finally:
         second.db.close()
+
+
+@pytest.mark.parametrize("kind", ["event", "preference", "goal", "agreement"])
+async def test_explicit_self_report_cannot_be_forgotten_as_merely_low_value(store, kind):
+    cfg = await enable(store)
+    text = "我前两天刚续了90天麦金卡"
+    mid, source = await add_memory(store, text=text, summary="两天前续费90天餐饮会员", kind=kind)
+    snap = prepare(store, cfg)
+    before = original_data(store, mid, source)
+    result = apply(
+        store, cfg, snap, review(decision(mid, source, text, reason="琐碎日常消费，价值不高"))
+    )
+    assert result["forgotten"] == [] and result["uncertain"] == [mid]
+    assert original_data(store, mid, source) == before
+    row = store.db.execute(
+        "SELECT action,reason FROM memory_semantic_checks WHERE memory_id=?", (mid,)
+    ).fetchone()
+    assert row[0] == "uncertain" and "不能仅凭价值评价" in row[1]
