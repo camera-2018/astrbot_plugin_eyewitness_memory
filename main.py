@@ -17,6 +17,7 @@ from .eyewitness.context import history_markers, platform_time
 from .eyewitness.engine import Engine
 from .eyewitness.errors import failure_detail
 from .eyewitness.generation import generate_once
+from .eyewitness.scope_aliases import canonical_scope
 from .eyewitness.store import Store
 from .eyewitness.systemone import SystemOneClient
 from .eyewitness.usage import ModelReply
@@ -148,7 +149,8 @@ class EyewitnessMemoryPlugin(Star):
             return
         try:
             cfg = await self.store.call("get_settings")
-            if cfg.mode == "off" or event.unified_msg_origin not in cfg.allowed_scopes:
+            scope = canonical_scope(event.unified_msg_origin, cfg.scope_aliases)
+            if cfg.mode == "off" or scope not in cfg.allowed_scopes:
                 return
             # Never stringify image/base64 payloads or copy whole historical contexts.
             visible = (

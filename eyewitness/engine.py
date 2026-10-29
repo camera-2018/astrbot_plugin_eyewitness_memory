@@ -29,6 +29,7 @@ from .models import (
     CandidateShortlist,
     Extraction,
     GroundedReview,
+    MaintenanceReview,
     QueryPlan,
     Review,
     Settings,
@@ -50,6 +51,7 @@ from .retrieval import (
     merge_rankings,
     rank_candidates,
 )
+from .scope_aliases import canonical_scope, decode_message_key, platform_message_key
 from .store import Store
 from .systemone import candidate_request
 from .usage import ModelReply
@@ -98,6 +100,13 @@ REVIEW_INSTRUCTION = (
 
 
 class Engine:
+    _ERROR_PREFIXES = {
+        "worker": "后台任务异常：",
+        "extraction": "提取失败：",
+        "index": "向量索引暂不可用：",
+        "maintenance": "定时整理暂不可用：",
+    }
+
     def __init__(
         self,
         store: Store,
@@ -114,8 +123,37 @@ class Engine:
         self.systemone = systemone
         self.online = asyncio.Semaphore(2)
         self.worker_task: asyncio.Task | None = None
-        self.last_error = ""
+        self._errors: dict[str, str] = {}
+        self._failed_index_jobs: set[str] = set()
+        self.maintenance_lock = asyncio.Lock()
+        self.maintenance_task: asyncio.Task | None = None
+        self.last_maintenance: dict = {}
         self.last_cycle = 0.0
+
+    @property
+    def last_error(self) -> str:
+        # Keep the existing panel/API field while retaining faults from other
+        # stages when a newer, unrelated error temporarily takes precedence.
+        return next(reversed(self._errors.values()), "")
+
+    @last_error.setter
+    def last_error(self, value: str):
+        if not value:
+            self._errors.clear()
+            return
+        stage = next(
+            (stage for stage, prefix in self._ERROR_PREFIXES.items() if value.startswith(prefix)),
+            "other",
+        )
+        self._errors.pop(stage, None)
+        self._errors[stage] = value
+
+    def _report_error(self, stage: str, exc: Exception):
+        self.last_error = self._ERROR_PREFIXES[stage] + failure_detail(exc)
+        self.report(self.last_error)
+
+    def _clear_error(self, stage: str):
+        self._errors.pop(stage, None)
 
     async def start(self):
         if self.vector:
@@ -123,6 +161,9 @@ class Engine:
         self.worker_task = asyncio.create_task(self.worker(), name="eyewitness-memory-worker")
 
     async def close(self):
+        if self.maintenance_task:
+            self.maintenance_task.cancel()
+            await asyncio.gather(self.maintenance_task, return_exceptions=True)
         if self.worker_task:
             self.worker_task.cancel()
             await asyncio.gather(self.worker_task, return_exceptions=True)
@@ -137,6 +178,7 @@ class Engine:
             GroundedReview: "联合核验",
             Review: "相关性审核",
             Verification: "原文核验",
+            MaintenanceReview: "定时记忆整理",
         }.get(schema, "辅助模型")
         if not cfg.provider_id:
             raise AuxiliaryModelFailure(f"{stage}：未配置辅助模型")
@@ -247,14 +289,82 @@ class Engine:
                 else:
                     await self.vector.delete(cfg, mid)
                 await self.store.call("index_done", mid, m["version"] if m else None)
+                self._failed_index_jobs.discard(mid)
                 indexed = True
             except Exception as exc:
                 failed = True
-                self.last_error = "向量索引暂不可用：" + failure_detail(exc)
-                self.report(self.last_error)
+                self._failed_index_jobs.add(mid)
+                self._report_error("index", exc)
                 await self.store.call("index_failed", mid, job["attempts"])
-        if indexed and not failed and self.last_error.startswith("向量索引暂不可用："):
-            self.last_error = ""
+        if indexed and not failed and not self._failed_index_jobs:
+            self._clear_error("index")
+
+    def start_maintenance(self):
+        if self.maintenance_lock.locked() or (
+            self.maintenance_task and not self.maintenance_task.done()
+        ):
+            return False
+        self.maintenance_task = asyncio.create_task(
+            self.maintenance_once(force=True), name="eyewitness-memory-maintenance"
+        )
+        return True
+
+    async def maintenance_once(self, *, force=False):
+        from .semantic_maintenance import INSTRUCTION
+
+        if self.maintenance_lock.locked():
+            return {"status": "busy"}
+        async with self.maintenance_lock:
+            try:
+                cfg = await self.store.call("get_settings")
+                if cfg.mode != "active" or not cfg.maintenance_enabled:
+                    return {"status": "disabled"}
+                result = await self.store.call("run_maintenance", force=force)
+                if result["status"] != "completed":
+                    return result
+                self.last_maintenance = result
+                semantic = {"reviewed": 0, "forgotten": 0, "uncertain": 0, "calls": 0}
+                self.last_maintenance["semantic"] = semantic
+                seen = set()
+                if cfg.maintenance_semantic_enabled:
+                    if not cfg.provider_id:
+                        raise AuxiliaryModelFailure("未配置用于整理的辅助模型")
+                    # No retries: at most ceil(limit / 8) calls in one scheduled run.
+                    for _ in range((cfg.maintenance_review_limit + 7) // 8):
+                        remaining = cfg.maintenance_review_limit - len(seen)
+                        if remaining <= 0:
+                            break
+                        snapshot = await self.store.call(
+                            "prepare_semantic_maintenance", min(8, remaining), sorted(seen)
+                        )
+                        if not snapshot:
+                            break
+                        current = await self.store.call("get_settings")
+                        if current.model_dump() != snapshot["settings"]:
+                            raise AuxiliaryModelFailure("整理配置已变化，未调用模型")
+                        if not await self.store.call("reserve_semantic_maintenance", snapshot):
+                            break
+                        semantic["calls"] += 1
+                        async with asyncio.timeout(current.maintenance_timeout):
+                            review = await self.ask(
+                                current, INSTRUCTION, snapshot["payload"], MaintenanceReview
+                            )
+                        applied = await self.store.call(
+                            "apply_semantic_maintenance", snapshot, review
+                        )
+                        semantic["reviewed"] += applied["reviewed"]
+                        semantic["forgotten"] += len(applied["forgotten"])
+                        semantic["uncertain"] += len(applied["uncertain"])
+                        seen.update(snapshot["targets"])
+                self._clear_error("maintenance")
+                return result
+            except Exception as exc:
+                self._report_error("maintenance", exc)
+                self.last_maintenance = {
+                    **self.last_maintenance,
+                    "semantic_error": failure_detail(exc),
+                }
+                return {"status": "failed", "error": failure_detail(exc)}
 
     async def worker(self):
         while True:
@@ -266,16 +376,17 @@ class Engine:
                         try:
                             completed = await self.extract_once(cfg)
                         except Exception as exc:
-                            self.last_error = "提取失败：" + failure_detail(exc)
-                            self.report(self.last_error)
+                            self._report_error("extraction", exc)
                         else:
-                            if completed and self.last_error.startswith("提取失败："):
-                                self.last_error = ""
+                            if completed:
+                                self._clear_error("extraction")
                     await self.index_once(cfg)
+                    if cfg.maintenance_enabled:
+                        await self.maintenance_once()
                 self.last_cycle = time.time()
+                self._clear_error("worker")
             except Exception as exc:
-                self.last_error = "后台任务异常：" + failure_detail(exc)
-                self.report(self.last_error)
+                self._report_error("worker", exc)
             await asyncio.sleep(30)
 
     async def recall(
@@ -291,6 +402,10 @@ class Engine:
         conversation: list | None = None,
     ):
         cfg = await self.store.call("get_settings")
+        origin_scope = scope
+        scope = canonical_scope(origin_scope, cfg.scope_aliases)
+        if reply_id:
+            reply_id = platform_message_key(origin_scope, scope, reply_id)
         privacy_epoch = await self.store.call("epoch")
         started = time.monotonic()
         result = {
@@ -338,13 +453,17 @@ class Engine:
                 self.report(result["reason"])
         # Recheck active state after awaits; deleted/edited/expired memories cannot escape here.
         current = await self.store.call("get_settings")
-        if current.mode == "off" or scope not in current.allowed_scopes:
+        if (
+            current.mode == "off"
+            or scope not in current.allowed_scopes
+            or canonical_scope(origin_scope, current.scope_aliases) != scope
+        ):
             result.update(
                 selected=[],
                 candidates=[],
                 injection="",
                 mode=current.mode,
-                reason="运行期间作用域已关闭，结果已撤销",
+                reason="运行期间作用域或群映射已改变，结果已撤销",
             )
             return result
         valid = []
@@ -436,7 +555,11 @@ class Engine:
     async def _recall(
         self, cfg, scope, query, sender_id, reply_id, visible, result, conversation, *, deadline
     ):
-        quoted = await self.store.call("referenced_message", scope, reply_id) if reply_id else None
+        quoted = (
+            await self.store.call("referenced_message", scope, reply_id, stored_key=True)
+            if reply_id
+            else None
+        )
         # Only a real platform reference expands the current query. Session
         # context is a separate recall branch, not an intent inferred from words.
         search_query = query + (" " + quoted["text"][:400] if quoted else "")
@@ -563,7 +686,9 @@ class Engine:
         result["stage"] = "联合核验"
         reviews = await asyncio.gather(
             *[
-                self.ground_batch(cfg, group, rows, ctx, request, reply_id)
+                self.ground_batch(
+                    cfg, group, rows, ctx, request, decode_message_key(reply_id, scope)[1]
+                )
                 for group, rows, ctx in batches
             ],
             return_exceptions=True,

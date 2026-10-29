@@ -52,6 +52,24 @@ export type Memory = {
   }[];
 };
 export type Scope = { scope: string; messages: number; pending: number };
+export type MaintenanceResult = {
+  status?: string;
+  scanned: number;
+  counts: Record<string, number>;
+  decisions: { id: string; code: string; reason: string; to_status: string }[];
+};
+export type MaintenanceStatus = {
+  enabled: boolean;
+  interval_hours: number;
+  next_due: number | null;
+  last_success: number | null;
+  running: boolean;
+  last_run: { scanned: number; counts: Record<string, number> } | null;
+  latest?: {
+    semantic?: { reviewed: number; forgotten: number; uncertain: number; calls: number };
+    semantic_error?: string;
+  };
+};
 export type Overview = {
   messages: number;
   memories: number;
@@ -75,6 +93,7 @@ export type Overview = {
   mode: string;
   last_error: string;
   last_cycle: number;
+  maintenance?: MaintenanceStatus;
   scopes: Scope[];
   version: string;
 };
@@ -82,6 +101,7 @@ export type Settings = {
   revision?: string;
   mode: "off" | "active";
   allowed_scopes: string[];
+  scope_aliases: string[];
   bot_ids: string[];
   provider_id: string;
   embedding_provider_id: string;
@@ -104,6 +124,11 @@ export type Settings = {
   max_db_mb: number;
   injection_chars: number;
   semantic_min_score: number;
+  maintenance_enabled: boolean;
+  maintenance_interval_hours: number;
+  maintenance_semantic_enabled: boolean;
+  maintenance_review_limit: number;
+  maintenance_timeout: number;
 };
 export type Recall = {
   reason: string;

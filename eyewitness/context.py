@@ -8,6 +8,8 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 
+from .scope_aliases import decode_message_key
+
 TZ = timezone(timedelta(hours=8))
 CONTEXT_ROWS = 50
 CONTEXT_CHARS = 18000
@@ -30,12 +32,15 @@ def message_order(row):
 
 
 def context_message(row, *, source=False, quote=""):
-    return {
+    scope = row.get("scope", "")
+    origin, platform_id = decode_message_key(row.get("platform_id"), scope)
+    _, reply_id = decode_message_key(row["reply_id"], scope)
+    result = {
         "id": row["id"],
         "sender_id": row["sender_id"],
         "sender_name": row["sender_name"],
         "text": row["text"],
-        "reply_id": row["reply_id"],
+        "reply_id": reply_id,
         "created": row["created"],
         "sent_at": row.get("sent_at"),
         "time": datetime.fromtimestamp(message_time(row), TZ).isoformat(timespec="seconds"),
@@ -45,6 +50,9 @@ def context_message(row, *, source=False, quote=""):
         "is_source": source,
         "quote": quote,
     }
+    if origin != scope or platform_id != row.get("platform_id"):
+        result.update(origin_scope=origin, platform_message_id=platform_id)
+    return result
 
 
 def bounded_context(rows, required, max_chars=CONTEXT_CHARS, max_rows=CONTEXT_ROWS):
@@ -146,6 +154,11 @@ def render_memory(item, budget, seen_ids=None):
                         "消息ID": r["id"],
                         "引用消息ID": r["reply_id"],
                         "正文": r["text"],
+                        **(
+                            {"来源会话": r["origin_scope"], "平台消息ID": r["platform_message_id"]}
+                            if r.get("origin_scope")
+                            else {}
+                        ),
                     },
                     ensure_ascii=False,
                 ),

@@ -10,7 +10,7 @@ from .models import extraction_noise
 
 def compact_message(row: dict) -> dict:
     message = context_message(row) if "time" not in row else row
-    return {
+    result = {
         k: message.get(k)
         for k in (
             "id",
@@ -23,6 +23,11 @@ def compact_message(row: dict) -> dict:
             "is_source",
         )
     }
+    # Retain transport attribution only where an explicit group alias was used.
+    for key in ("origin_scope", "platform_message_id"):
+        if key in message:
+            result[key] = message[key]
+    return result
 
 
 def extraction_messages(batch: list[dict], context: list[dict], bot_ids: list[str]):

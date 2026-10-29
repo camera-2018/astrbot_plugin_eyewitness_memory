@@ -1,30 +1,298 @@
 {
-  "mode": {"description": "插件开关", "type": "string", "default": "off", "options": ["off", "active"], "labels": ["关闭", "启用"], "hint": "关闭后停止采集、提取和召回；启用后仅记录白名单群。"},
-  "allowed_scopes": {"description": "允许记录的群", "type": "list", "default": [], "hint": "填写完整会话标识，例如 default:GroupMessage:123456，不是单独群号。"},
-  "bot_ids": {"description": "其他机器人 ID", "type": "list", "default": [], "hint": "不采集这些账号的消息。"},
-  "provider_id": {"description": "辅助模型", "type": "string", "default": "", "_special": "select_provider", "hint": "用于提取、问题理解、候选选择和原文核验，需要支持 JSON 输出。"},
-  "json_mode": {"description": "请求 JSON 对象输出", "type": "bool", "default": false, "hint": "仅用于已验证支持 response_format=json_object 的 OpenAI Chat Completion 渠道。只影响记忆请求，同时使用 temperature=0；不支持时关闭。"},
-  "embedding_provider_id": {"description": "Embedding 模型（可选）", "type": "string", "default": "", "_special": "select_provider_embedding", "options": [""], "hint": "候选来自 AstrBot 已配置的向量模型。留空仅使用关键词检索；新增提供方后重载本插件刷新候选。"},
-  "systemone_provider_id": {"description": "System One 提供方（可选）", "type": "string", "default": "", "_special": "select_provider", "hint": "只复用所选提供方的地址与密钥，不调用它的聊天模型。留空关闭；用于候选排序，不直接接受或丢弃记忆。"},
-  "systemone_check_support": {"description": "System One 原文初核", "type": "bool", "default": true, "hint": "关闭时仅做相关性排序，每候选一次调用；建议 FastBrain 关闭此项。最终辅助模型仍严格核验原文，排序结果不能直接放行记忆。"},
-  "systemone_model": {"description": "System One 模型名", "type": "string", "default": "", "hint": "如 FastBrain-9B、jev-1.13.0、clef-flash。必须是上述提供方支持的 System One 模型；不是聊天模型。"},
-  "systemone_api_path": {"description": "System One 接口路径", "type": "string", "default": "/typesafe/v1/systemone", "hint": "New API 的 Jev 插件用 /typesafe/v1/systemone，Clef 插件用 /clef/v1/systemone；直连服务用 /v1/systemone。"},
-  "systemone_timeout": {"description": "System One 排序时间上限（秒）", "type": "float", "default": 3.0, "slider": {"min": 0.2, "max": 10, "step": 0.2}, "hint": "同时不超过剩余在线预算的四分之一。失败不重试、不删除候选，继续由辅助模型核验。"},
-  "qdrant_url": {"description": "Qdrant URL", "type": "string", "default": "", "hint": "留空仅关键词检索，例如 http://qdrant:6333。"},
-  "qdrant_api_key": {"description": "Qdrant API Key（可选）", "type": "string", "default": "", "secret": true, "hint": "密钥保存在 AstrBot 插件配置中；插件管理页面只允许修改，不返回已有密钥。"},
-  "collection": {"description": "独立 Collection 前缀", "type": "string", "default": "eyewitness_memory_v1", "hint": "必须以 eyewitness_memory_ 开头，不要复用其他插件索引。"},
-  "online_timeout": {"description": "单次在线时间预算（秒）", "type": "float", "default": 30.0, "slider": {"min": 0.5, "max": 30, "step": 0.5}},
-  "understanding_timeout": {"description": "问题理解时间上限（秒）", "type": "float", "default": 8.0, "slider": {"min": 0.5, "max": 15, "step": 0.5}, "hint": "辅助模型解析当前问题和明确指代，不按关键词判断；同时不超过剩余在线预算的四分之一。失败保留原问题检索，不重试。"},
-  "query_expansion_limit": {"description": "补充检索线索上限", "type": "int", "default": 3, "slider": {"min": 0, "max": 4, "step": 1}, "hint": "原问题始终独立检索。辅助模型可生成这些额外线索，但线索不是事实或证据；0 仅关闭问题理解。"},
-  "candidate_pool_size": {"description": "送辅助模型选择的候选池上限", "type": "int", "default": 24, "slider": {"min": 3, "max": 48, "step": 1}, "hint": "先广搜，再用辅助模型比较有界摘要池；同时受请求字符预算保护，不先截成三条。"},
-  "source_review_limit": {"description": "单轮原文核验候选上限", "type": "int", "default": 6, "slider": {"min": 1, "max": 12, "step": 1}, "hint": "辅助模型从候选池中选择值得查证的内容，分批并行核验各自原文；最多注入两条，且受实际上下文预算限制。"},
-  "extraction_timeout": {"description": "后台提取超时（秒）", "type": "float", "default": 60.0, "slider": {"min": 5, "max": 180, "step": 1}},
-  "batch_size": {"description": "后台每批送审新消息上限", "type": "int", "default": 80, "slider": {"min": 5, "max": 100, "step": 1}, "hint": "本地最多扫描三倍原文，筛选后合批送审；另附有界引用上下文。低价值原文不会删除。"},
-  "batch_age_seconds": {"description": "未满批次最长等待（秒）", "type": "int", "default": 900, "slider": {"min": 60, "max": 86400, "step": 1}},
-  "retention_days": {"description": "未引用原文保留（天）", "type": "int", "default": 30, "slider": {"min": 1, "max": 365, "step": 1}},
-  "trace_days": {"description": "召回记录保留（天）", "type": "int", "default": 7, "slider": {"min": 1, "max": 90, "step": 1}},
-  "max_db_mb": {"description": "SQLite＋WAL 采集保护线（MiB）", "type": "int", "default": 512, "slider": {"min": 16, "max": 4096, "step": 1}},
-  "injection_chars": {"description": "注入字符上限", "type": "int", "default": 8000, "slider": {"min": 200, "max": 16000, "step": 1}, "hint": "按字符计算，不等于 tokens。"},
-  "semantic_min_score": {"description": "纯语义候选最低分", "type": "float", "default": 0.55, "slider": {"min": 0.0, "max": 1.0, "step": 0.01}, "hint": "没有当前消息/会话的文本匹配或明确人物匹配时，向量分数须达到此值才送模型核验。不用固定闲聊或回忆词表判断意图。分数不是置信概率；更换向量模型后需重新观察。设为 0 可放开此筛选。"},
-  "config_version": {"description": "配置迁移版本", "type": "int", "default": 0, "invisible": true}
+  "mode": {
+    "description": "插件开关",
+    "type": "string",
+    "default": "off",
+    "options": [
+      "off",
+      "active"
+    ],
+    "labels": [
+      "关闭",
+      "启用"
+    ],
+    "hint": "关闭后停止采集、提取和召回；启用后仅记录白名单群。"
+  },
+  "allowed_scopes": {
+    "description": "允许记录的群",
+    "type": "list",
+    "default": [],
+    "hint": "填写完整会话标识，例如 default:GroupMessage:123456，不是单独群号。"
+  },
+  "bot_ids": {
+    "description": "其他机器人 ID",
+    "type": "list",
+    "default": [],
+    "hint": "不采集这些账号的消息。"
+  },
+  "provider_id": {
+    "description": "辅助模型",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "用于提取、问题理解、候选选择和原文核验，需要支持 JSON 输出。"
+  },
+  "json_mode": {
+    "description": "请求 JSON 对象输出",
+    "type": "bool",
+    "default": false,
+    "hint": "仅用于已验证支持 response_format=json_object 的 OpenAI Chat Completion 渠道。只影响记忆请求，同时使用 temperature=0；不支持时关闭。"
+  },
+  "embedding_provider_id": {
+    "description": "Embedding 模型（可选）",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider_embedding",
+    "options": [
+      ""
+    ],
+    "hint": "候选来自 AstrBot 已配置的向量模型。留空仅使用关键词检索；新增提供方后重载本插件刷新候选。"
+  },
+  "systemone_provider_id": {
+    "description": "System One 提供方（可选）",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "只复用所选提供方的地址与密钥，不调用它的聊天模型。留空关闭；用于候选排序，不直接接受或丢弃记忆。"
+  },
+  "systemone_check_support": {
+    "description": "System One 原文初核",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭时仅做相关性排序，每候选一次调用；建议 FastBrain 关闭此项。最终辅助模型仍严格核验原文，排序结果不能直接放行记忆。"
+  },
+  "systemone_model": {
+    "description": "System One 模型名",
+    "type": "string",
+    "default": "",
+    "hint": "如 FastBrain-9B、jev-1.13.0、clef-flash。必须是上述提供方支持的 System One 模型；不是聊天模型。"
+  },
+  "systemone_api_path": {
+    "description": "System One 接口路径",
+    "type": "string",
+    "default": "/typesafe/v1/systemone",
+    "hint": "New API 的 Jev 插件用 /typesafe/v1/systemone，Clef 插件用 /clef/v1/systemone；直连服务用 /v1/systemone。"
+  },
+  "systemone_timeout": {
+    "description": "System One 排序时间上限（秒）",
+    "type": "float",
+    "default": 3.0,
+    "slider": {
+      "min": 0.2,
+      "max": 10,
+      "step": 0.2
+    },
+    "hint": "同时不超过剩余在线预算的四分之一。失败不重试、不删除候选，继续由辅助模型核验。"
+  },
+  "qdrant_url": {
+    "description": "Qdrant URL",
+    "type": "string",
+    "default": "",
+    "hint": "留空仅关键词检索，例如 http://qdrant:6333。"
+  },
+  "qdrant_api_key": {
+    "description": "Qdrant API Key（可选）",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "密钥保存在 AstrBot 插件配置中；插件管理页面只允许修改，不返回已有密钥。"
+  },
+  "collection": {
+    "description": "独立 Collection 前缀",
+    "type": "string",
+    "default": "eyewitness_memory_v1",
+    "hint": "必须以 eyewitness_memory_ 开头，不要复用其他插件索引。"
+  },
+  "online_timeout": {
+    "description": "单次在线时间预算（秒）",
+    "type": "float",
+    "default": 30.0,
+    "slider": {
+      "min": 0.5,
+      "max": 30,
+      "step": 0.5
+    }
+  },
+  "understanding_timeout": {
+    "description": "问题理解时间上限（秒）",
+    "type": "float",
+    "default": 8.0,
+    "slider": {
+      "min": 0.5,
+      "max": 15,
+      "step": 0.5
+    },
+    "hint": "辅助模型解析当前问题和明确指代，不按关键词判断；同时不超过剩余在线预算的四分之一。失败保留原问题检索，不重试。"
+  },
+  "query_expansion_limit": {
+    "description": "补充检索线索上限",
+    "type": "int",
+    "default": 3,
+    "slider": {
+      "min": 0,
+      "max": 4,
+      "step": 1
+    },
+    "hint": "原问题始终独立检索。辅助模型可生成这些额外线索，但线索不是事实或证据；0 仅关闭问题理解。"
+  },
+  "candidate_pool_size": {
+    "description": "送辅助模型选择的候选池上限",
+    "type": "int",
+    "default": 24,
+    "slider": {
+      "min": 3,
+      "max": 48,
+      "step": 1
+    },
+    "hint": "先广搜，再用辅助模型比较有界摘要池；同时受请求字符预算保护，不先截成三条。"
+  },
+  "source_review_limit": {
+    "description": "单轮原文核验候选上限",
+    "type": "int",
+    "default": 6,
+    "slider": {
+      "min": 1,
+      "max": 12,
+      "step": 1
+    },
+    "hint": "辅助模型从候选池中选择值得查证的内容，分批并行核验各自原文；最多注入两条，且受实际上下文预算限制。"
+  },
+  "extraction_timeout": {
+    "description": "后台提取超时（秒）",
+    "type": "float",
+    "default": 60.0,
+    "slider": {
+      "min": 5,
+      "max": 180,
+      "step": 1
+    }
+  },
+  "batch_size": {
+    "description": "后台每批送审新消息上限",
+    "type": "int",
+    "default": 80,
+    "slider": {
+      "min": 5,
+      "max": 100,
+      "step": 1
+    },
+    "hint": "本地最多扫描三倍原文，筛选后合批送审；另附有界引用上下文。低价值原文不会删除。"
+  },
+  "batch_age_seconds": {
+    "description": "未满批次最长等待（秒）",
+    "type": "int",
+    "default": 900,
+    "slider": {
+      "min": 60,
+      "max": 86400,
+      "step": 1
+    }
+  },
+  "retention_days": {
+    "description": "未引用原文保留（天）",
+    "type": "int",
+    "default": 30,
+    "slider": {
+      "min": 1,
+      "max": 365,
+      "step": 1
+    }
+  },
+  "trace_days": {
+    "description": "召回记录保留（天）",
+    "type": "int",
+    "default": 7,
+    "slider": {
+      "min": 1,
+      "max": 90,
+      "step": 1
+    }
+  },
+  "max_db_mb": {
+    "description": "SQLite＋WAL 采集保护线（MiB）",
+    "type": "int",
+    "default": 512,
+    "slider": {
+      "min": 16,
+      "max": 4096,
+      "step": 1
+    }
+  },
+  "injection_chars": {
+    "description": "注入字符上限",
+    "type": "int",
+    "default": 8000,
+    "slider": {
+      "min": 200,
+      "max": 16000,
+      "step": 1
+    },
+    "hint": "按字符计算，不等于 tokens。"
+  },
+  "semantic_min_score": {
+    "description": "纯语义候选最低分",
+    "type": "float",
+    "default": 0.55,
+    "slider": {
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01
+    },
+    "hint": "没有当前消息/会话的文本匹配或明确人物匹配时，向量分数须达到此值才送模型核验。不用固定闲聊或回忆词表判断意图。分数不是置信概率；更换向量模型后需重新观察。设为 0 可放开此筛选。"
+  },
+  "config_version": {
+    "description": "配置迁移版本",
+    "type": "int",
+    "default": 0,
+    "invisible": true
+  },
+  "scope_aliases": {
+    "description": "同群跨平台映射",
+    "type": "list",
+    "default": [],
+    "hint": "每项填 来源群UMO=统一群UMO，例如 qq_official:GroupMessage:OPENID=default:GroupMessage:123456。须确认是同一个群；白名单填写统一群UMO，不会合并成员身份或改发消息目的地。"
+  },
+  "maintenance_enabled": {
+    "description": "定时整理记忆",
+    "type": "bool",
+    "default": false,
+    "hint": "定期检查白名单群中的过期、失效证据和完全重复记忆，停用后可恢复；不删除原文，不续期。"
+  },
+  "maintenance_interval_hours": {
+    "description": "整理间隔（小时）",
+    "type": "int",
+    "default": 24,
+    "slider": {
+      "min": 1,
+      "max": 720,
+      "step": 1
+    },
+    "hint": "首次启用从当前时间开始计时；重启保留下一次执行时间。"
+  },
+  "maintenance_semantic_enabled": {
+    "description": "限量语义整理",
+    "type": "bool",
+    "default": false,
+    "hint": "使用当前辅助模型判断低价值、重复及被后来明确纠正的记忆；需逐字来源支持，歧义保留。会产生模型用量；原文和停用前版本保留。"
+  },
+  "maintenance_review_limit": {
+    "description": "每 24 小时语义整理最多记忆数",
+    "type": "int",
+    "default": 32,
+    "slider": {
+      "min": 1,
+      "max": 128,
+      "step": 1
+    }
+  },
+  "maintenance_timeout": {
+    "description": "单次整理模型超时（秒）",
+    "type": "float",
+    "default": 45.0,
+    "slider": {
+      "min": 5,
+      "max": 120,
+      "step": 1
+    }
+  }
 }

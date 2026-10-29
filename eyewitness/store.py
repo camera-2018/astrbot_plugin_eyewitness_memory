@@ -15,6 +15,7 @@ from .context import bounded_context, context_message, message_order, message_ti
 from .errors import AuxiliaryModelFailure, RetryConflict
 from .evidence import source_quote
 from .models import Candidate, Settings, extraction_noise, safe_text, terms
+from .scope_aliases import canonical_scope, platform_message_key
 
 
 class Store:
@@ -82,7 +83,7 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path, check_same_thread=False, timeout=5)
         self.db.row_factory = sqlite3.Row
-        if self.db.execute("PRAGMA user_version").fetchone()[0] > 4:
+        if self.db.execute("PRAGMA user_version").fetchone()[0] > 5:
             self.db.close()
             self.db = None
             raise ValueError("数据库版本较新，不能用旧版插件打开")
@@ -111,6 +112,11 @@ class Store:
                 memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
                 message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
                 quote TEXT NOT NULL, PRIMARY KEY(memory_id, message_id)
+            );
+            CREATE TABLE IF NOT EXISTS memory_context (
+                memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+                message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                PRIMARY KEY(memory_id, message_id)
             );
             CREATE TABLE IF NOT EXISTS versions (
                 id INTEGER PRIMARY KEY, memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
@@ -162,7 +168,7 @@ class Store:
                 "UPDATE model_calls SET status='interrupted',error='请求被中断，用量未知' "
                 "WHERE status='running'"
             )
-            self.db.execute("PRAGMA user_version=4")
+            self.db.execute("PRAGMA user_version=5")
             self.db.execute("""
                 UPDATE settings SET data=json_set(data, '$.mode', 'off')
                 WHERE json_extract(data, '$.mode')='shadow'
@@ -249,6 +255,8 @@ class Store:
         sent_at: float | None = None,
     ) -> str | None:
         cfg = self.get_settings()
+        origin_scope = scope
+        scope = canonical_scope(origin_scope, cfg.scope_aliases)
         if cfg.mode == "off" or scope not in cfg.allowed_scopes or sender_id in cfg.bot_ids:
             return None
         if self.size_bytes() > cfg.max_db_mb * 1024**2:
@@ -256,7 +264,11 @@ class Store:
         text = safe_text(text).strip()
         if not text or text == "[已脱敏]":
             return None
-        mid = str(uuid.uuid5(uuid.NAMESPACE_URL, scope + ":" + platform_id))
+        # UUID identity is the original transport, even when memories share a group.
+        mid = str(uuid.uuid5(uuid.NAMESPACE_URL, origin_scope + ":" + platform_id))
+        platform_id = platform_message_key(origin_scope, scope, platform_id)
+        if reply_id:
+            reply_id = platform_message_key(origin_scope, scope, reply_id)
         with self.db:
             self.db.execute(
                 "INSERT OR IGNORE INTO messages(id,scope,platform_id,sender_id,sender_name,text,reply_id,created,sent_at,processed) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -286,6 +298,7 @@ class Store:
         return list(result.values())
 
     def recent(self, scope: str, limit: int = 12):
+        scope = canonical_scope(scope, self.get_settings().scope_aliases)
         return [
             dict(r)
             for r in reversed(
@@ -296,7 +309,11 @@ class Store:
             )
         ]
 
-    def referenced_message(self, scope: str, platform_id: str):
+    def referenced_message(self, scope: str, platform_id: str, *, stored_key: bool = False):
+        origin_scope = scope
+        scope = canonical_scope(scope, self.get_settings().scope_aliases)
+        if not stored_key:
+            platform_id = platform_message_key(origin_scope, scope, platform_id)
         row = self.db.execute(
             "SELECT * FROM messages WHERE scope=? AND platform_id=?", (scope, platform_id)
         ).fetchone()
@@ -338,7 +355,7 @@ class Store:
         ]
         for item in batch:
             if item.get("reply_id"):
-                row = self.referenced_message(scope, item["reply_id"])
+                row = self.referenced_message(scope, item["reply_id"], stored_key=True)
                 if row:
                     rows.append(row)
         batch_ids = {r["id"] for r in batch}
@@ -375,6 +392,7 @@ class Store:
 
     def failed_batches(self, scope: str = "", offset: int = 0):
         cfg = self.get_settings()
+        scope = canonical_scope(scope, cfg.scope_aliases)
         where = "processed=3 AND (?='' OR scope=?)"
         grouped = " FROM messages WHERE " + where + " GROUP BY scope,extraction_attempted_at"
         total = self.db.execute(
@@ -432,6 +450,7 @@ class Store:
         return {"queued": cursor.rowcount, "scope": row["scope"]}
 
     def source_rows(self, scope: str, ids: list[str]):
+        scope = canonical_scope(scope, self.get_settings().scope_aliases)
         if not ids:
             return []
         marks = ",".join("?" for _ in ids[:500])
@@ -541,6 +560,8 @@ class Store:
         )
 
     def detail(self, mid: str, scope: str | None = None):
+        if scope:
+            scope = canonical_scope(scope, self.get_settings().scope_aliases)
         row = self.db.execute("SELECT * FROM memories WHERE id=?", (mid,)).fetchone()
         if not row or (scope is not None and row["scope"] != scope):
             return None
@@ -564,10 +585,20 @@ class Store:
         return result
 
     def source_context(self, mid: str, scope: str):
+        scope = canonical_scope(scope, self.get_settings().scope_aliases)
         memory = self.detail(mid, scope)
         if not memory or not memory["sources"]:
             return []
         found = {r["id"]: r for r in memory["sources"]}
+        retained_context = {
+            r["id"]: dict(r)
+            for r in self.db.execute(
+                "SELECT x.* FROM memory_context c JOIN messages x ON x.id=c.message_id "
+                "WHERE c.memory_id=? AND x.scope=?",
+                (mid, scope),
+            )
+        }
+        found.update(retained_context)
         for r in memory["sources"]:
             for op, direction in (("<", "DESC"), (">", "ASC")):
                 for n in self.db.execute(
@@ -576,9 +607,7 @@ class Store:
                 ):
                     found[n["id"]] = dict(n)
             if r["reply_id"]:
-                n = self.db.execute(
-                    "SELECT * FROM messages WHERE scope=? AND platform_id=?", (scope, r["reply_id"])
-                ).fetchone()
+                n = self.referenced_message(scope, r["reply_id"], stored_key=True)
                 if n:
                     found[n["id"]] = dict(n)
         quotes = {r["id"]: r["quote"] for r in memory["sources"]}
@@ -587,9 +616,10 @@ class Store:
             for r in found.values()
         ]
         rows.sort(key=message_order)
-        return bounded_context(rows, set(quotes))
+        return bounded_context(rows, set(quotes) | set(retained_context))
 
     def list_memories(self, scope: str = "", status: str = "", query: str = "", offset: int = 0):
+        scope = canonical_scope(scope, self.get_settings().scope_aliases)
         where, args = ["1=1"], []
         for column, value in [("scope", scope), ("status", status)]:
             if value:
@@ -607,6 +637,7 @@ class Store:
         return {"items": [dict(r) for r in rows], "total": count}
 
     def search(self, scope: str, query: str):
+        scope = canonical_scope(scope, self.get_settings().scope_aliases)
         ts = terms(query)
         if not ts:
             return []
@@ -620,6 +651,7 @@ class Store:
         ]
 
     def named_subjects(self, scope: str, query: str) -> list[str]:
+        scope = canonical_scope(scope, self.get_settings().scope_aliases)
         # Only names actually attached to source messages in this scope. Short
         # names and collisions are deliberately not resolved to a single person.
         rows = self.db.execute(
@@ -637,6 +669,7 @@ class Store:
         )[:20]
 
     def subject_memories(self, scope: str, subjects: list[str]):
+        scope = canonical_scope(scope, self.get_settings().scope_aliases)
         if not subjects:
             return []
         marks = ",".join("?" for _ in subjects[:20])
@@ -687,11 +720,16 @@ class Store:
             self.db.execute("DELETE FROM traces")
 
     def erase_subject(self, scope: str, subject: str):
+        scope = canonical_scope(scope, self.get_settings().scope_aliases)
         ids = [
             r[0]
             for r in self.db.execute(
-                "SELECT DISTINCT m.id FROM memories m LEFT JOIN sources s ON s.memory_id=m.id LEFT JOIN messages x ON x.id=s.message_id WHERE m.scope=? AND (m.subject_id=? OR x.sender_id=?)",
-                (scope, subject, subject),
+                "SELECT m.id FROM memories m WHERE m.scope=? AND (m.subject_id=? "
+                "OR EXISTS (SELECT 1 FROM sources s JOIN messages x ON x.id=s.message_id "
+                "WHERE s.memory_id=m.id AND x.sender_id=?) "
+                "OR EXISTS (SELECT 1 FROM memory_context c JOIN messages x ON x.id=c.message_id "
+                "WHERE c.memory_id=m.id AND x.sender_id=?))",
+                (scope, subject, subject, subject),
             )
         ]
         for mid in ids:
@@ -773,6 +811,7 @@ class Store:
         return tid
 
     def traces(self, scope: str = "", mode: str = ""):
+        scope = canonical_scope(scope, self.get_settings().scope_aliases)
         if mode not in ("", "active", "preview"):
             raise ValueError("Invalid trace mode")
         rows = self.db.execute(
@@ -782,6 +821,7 @@ class Store:
         return [{**dict(r), "data": json.loads(r["data"])} for r in rows]
 
     def recall_stats(self, scope: str = ""):
+        scope = canonical_scope(scope, self.get_settings().scope_aliases)
         result = {
             "window_hours": 24,
             "real": {"calls": 0, "injected": 0},
@@ -824,10 +864,41 @@ class Store:
                 (time.time() + min(3600, 30 * 2 ** min(attempts, 7)), mid),
             )
 
+    def maintenance_status(self):
+        from .maintenance import status
+        from .semantic_maintenance import budget_status
+
+        cfg = self.get_settings()
+        return {**status(self, cfg), "semantic_budget": budget_status(self, cfg)}
+
+    def run_maintenance(self, *, force=False, dry_run=False):
+        from .maintenance import run
+
+        cfg = self.get_settings()
+        if force and not dry_run and (cfg.mode == "off" or not cfg.maintenance_enabled):
+            return {"status": "disabled"}
+        return run(self, cfg, force=force, dry_run=dry_run)
+
+    def prepare_semantic_maintenance(self, limit=8, excluded=()):
+        from .semantic_maintenance import prepare
+
+        return prepare(self, self.get_settings(), limit, excluded)
+
+    def apply_semantic_maintenance(self, snapshot, review):
+        from .semantic_maintenance import apply
+
+        return apply(self, self.get_settings(), snapshot, review)
+
+    def reserve_semantic_maintenance(self, snapshot):
+        from .semantic_maintenance import reserve
+
+        return reserve(self, self.get_settings(), snapshot)
+
     def maintain(self, cfg: Settings):
         with self.db:
             self.db.execute(
-                "DELETE FROM messages WHERE created<? AND id NOT IN (SELECT message_id FROM sources)",
+                "DELETE FROM messages WHERE created<? AND id NOT IN "
+                "(SELECT message_id FROM sources UNION SELECT message_id FROM memory_context)",
                 (time.time() - cfg.retention_days * 86400,),
             )
             self.db.execute(

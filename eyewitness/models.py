@@ -3,13 +3,14 @@ from __future__ import annotations
 import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     mode: Literal["off", "active"] = "off"
     allowed_scopes: list[str] = Field(default_factory=list, max_length=100)
+    scope_aliases: list[str] = Field(default_factory=list, max_length=100)
     bot_ids: list[str] = Field(default_factory=list, max_length=500)
     provider_id: str = ""
     json_mode: bool = False
@@ -34,6 +35,27 @@ class Settings(BaseModel):
     max_db_mb: int = Field(default=512, ge=16, le=4096)
     injection_chars: int = Field(default=8000, ge=200, le=16000)
     semantic_min_score: float = Field(default=0.55, ge=0.0, le=1.0)
+    maintenance_enabled: bool = False
+    maintenance_interval_hours: int = Field(default=24, ge=1, le=720)
+    maintenance_semantic_enabled: bool = False
+    maintenance_review_limit: int = Field(default=32, ge=1, le=128)
+    maintenance_timeout: float = Field(default=45.0, ge=5, le=120)
+
+    @field_validator("scope_aliases")
+    @classmethod
+    def valid_scope_aliases(cls, values: list[str]) -> list[str]:
+        from .scope_aliases import parse_scope_aliases
+
+        aliases = parse_scope_aliases(values)
+        return [f"{source}={target}" for source, target in aliases.items()]
+
+    @model_validator(mode="after")
+    def canonical_allowlist(self):
+        from .scope_aliases import parse_scope_aliases
+
+        if set(parse_scope_aliases(self.scope_aliases)) & set(self.allowed_scopes):
+            raise ValueError("白名单请填写映射后的统一群，不能同时列入映射来源群")
+        return self
 
     @field_validator("systemone_model")
     @classmethod
@@ -99,6 +121,21 @@ class Candidate(BaseModel):
 class Extraction(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     candidates: list[Candidate] = Field(default_factory=list, max_length=8)
+
+
+class MaintenanceDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    id: str
+    action: Literal["keep", "forget", "uncertain"]
+    reason: str = Field(min_length=1, max_length=300)
+    category: Literal["useful", "low_value", "superseded", "duplicate", "uncertain"]
+    related_id: str = ""
+    evidence: list[EvidenceRef] = Field(default_factory=list, max_length=5)
+
+
+class MaintenanceReview(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    decisions: list[MaintenanceDecision] = Field(default_factory=list, max_length=16)
 
 
 class Decision(BaseModel):

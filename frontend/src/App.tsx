@@ -44,6 +44,8 @@ import {
   type Trace,
   type Recall,
   type FailedBatch,
+  type MaintenanceResult,
+  type MaintenanceStatus,
 } from "@/lib/api";
 
 type Page = "memories" | "traces" | "failures" | "preview" | "settings";
@@ -92,6 +94,79 @@ function Field({
       {hint && <small className="subtle">{hint}</small>}
     </label>
   );
+}
+
+const maintenanceReasons: Record<string, string> = {
+  expired: "已超过原有有效期",
+  missing_source: "原文来源不可用",
+  cross_scope_source: "来源属于其他会话",
+  invalid_quote: "引用无法逐字匹配原文",
+  author_mismatch: "自述证据混入其他作者，退回核验",
+  exact_duplicate: "与另一条有来源的记忆完全重复",
+};
+function versionActor(actor: string) {
+  if (actor.startsWith("maintenance:")) {
+    const code = actor.split(":").at(-1) || "";
+    return `定时整理 · ${maintenanceReasons[code] || "已调整记忆状态"}`;
+  }
+  if (actor.startsWith("scheduled-semantic:")) {
+    return `定时复核 · ${actor.split(":").slice(2).join(":") || "依据原文停用"}`;
+  }
+  if (actor.startsWith("codex_recovery:")) return "历史补提取";
+  return ({ extractor: "后台提取", "panel-admin": "管理页面修改" } as Record<string, string>)[actor] || actor;
+}
+
+function MaintenanceCard({ state, active, refresh }: {
+  state: MaintenanceStatus; active: boolean; refresh: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false), [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [preview, setPreview] = useState<MaintenanceResult | null>(null);
+  async function inspect() {
+    setBusy(true); setError(""); setMessage("");
+    try { setPreview(await api<MaintenanceResult>("maintenance/preview")); }
+    catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  }
+  async function start() {
+    if (!confirm("按已保存的设置整理记忆？只停用并保留原文及修改记录；若已开启语义复核，会调用当前辅助模型。")) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const result = await api<{ started: boolean }>("maintenance/run", { method: "POST", body: "{}" });
+      setMessage(result.started ? "整理已在后台开始，完成后这里会更新。" : "已有整理任务正在运行。");
+      setPreview(null);
+      await refresh();
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  }
+  const reasons = Object.entries((preview?.decisions || []).reduce<Record<string, number>>((counts, decision) => {
+    counts[decision.reason] = (counts[decision.reason] || 0) + 1;
+    return counts;
+  }, {}));
+  return <section className="memory-card mt-5 space-y-3" aria-label="记忆定时整理状态">
+    <div className="flex flex-wrap justify-between gap-2">
+      <h2 className="font-medium">记忆定时整理</h2>
+      <Badge variant="outline">{state.running ? "正在整理" : state.enabled ? `每 ${state.interval_hours} 小时` : "未启用"}</Badge>
+    </div>
+    <p className="subtle text-sm">
+      上次整理：{state.last_success ? date(state.last_success) : "尚未运行"}<br />
+      下次整理：{!state.enabled ? "未启用" : state.next_due ? date(state.next_due) : "等待后台排期"}
+    </p>
+    {state.last_run && <p className="text-sm">最近扫描 {state.last_run.scanned} 条 · 停用 {state.last_run.counts.disabled || 0} 条 · 退回核验 {state.last_run.counts.demoted_to_pending || 0} 条</p>}
+    {state.latest?.semantic && <p className="text-sm">最近语义复核 {state.latest.semantic.reviewed} 条 · 停用 {state.latest.semantic.forgotten} 条 · 歧义保留 {state.latest.semantic.uncertain} 条 · 模型调用 {state.latest.semantic.calls} 次</p>}
+    {state.latest?.semantic_error && <p className="notice">语义复核未完成：{state.latest.semantic_error}</p>}
+    <p className="subtle text-xs">过期、缺乏有效来源或完全重复的记忆会被停用，原文和修改记录保留。语义复核使用当前辅助模型，有歧义的内容保留；可在设置中开启。</p>
+    <div className="flex flex-wrap gap-2">
+      <Button variant="outline" size="sm" disabled={busy || state.running} onClick={() => void inspect()}>预览规则整理</Button>
+      <Button variant="outline" size="sm" disabled={busy || state.running || !state.enabled || !active} onClick={() => void start()}>{busy || state.running ? <Loader2 className="animate-spin" size={14} /> : <Archive size={14} />}立即整理</Button>
+    </div>
+    <ErrorNotice error={error} />
+    {message && <p role="status" className="subtle text-sm">{message}</p>}
+    {preview && <div className="border-t pt-3 space-y-2 text-sm">
+      <p>预览扫描 {preview.scanned} 条：拟停用 {preview.counts.disabled || 0} 条，退回核验 {preview.counts.demoted_to_pending || 0} 条。尚未修改记忆，也未调用模型。</p>
+      {reasons.map(([reason, count]) => <p key={reason}>{reason} · {count} 条</p>)}
+    </div>}
+  </section>;
 }
 
 export default function App() {
@@ -166,6 +241,7 @@ export default function App() {
         {overview?.last_error && (
           <div className="notice mt-5">最近后台状态：{overview.last_error}</div>
         )}
+        {overview?.maintenance && page === "memories" && <MaintenanceCard state={overview.maintenance} active={overview.mode === "active"} refresh={refresh} />}
         {overview?.recall_24h && page === "memories" && (
           <section className="memory-card mt-5 space-y-2">
             <h2 className="font-medium">实聊召回 · 最近 24 小时</h2>
@@ -532,7 +608,7 @@ function Memories({
                 {selected.versions?.map((v) => (
                   <details className="py-2 border-b subtle" key={v.version}>
                     <summary>
-                      v{v.version} · {v.actor} · {date(v.created)}
+                      v{v.version} · {versionActor(v.actor)} · {date(v.created)}
                     </summary>
                     <p className="mt-2 whitespace-pre-wrap">
                       {JSON.parse(v.snapshot).summary}
@@ -827,6 +903,7 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
     const cleaned = {
       ...cfg,
       allowed_scopes: cfg.allowed_scopes.map((s) => s.trim()).filter(Boolean),
+      scope_aliases: (cfg.scope_aliases || []).map((s) => s.trim()).filter(Boolean),
       bot_ids: cfg.bot_ids.map((s) => s.trim()).filter(Boolean),
       ...(keyChange !== null ? { qdrant_api_key: keyChange } : {}),
     };
@@ -939,6 +1016,12 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
               onChange={(e) => patch("bot_ids", e.target.value.split("\n"))}
             />
           </Field>
+          <Field title="同一群的会话映射（每行：新作用域=原作用域）" hint="只在确认两边是同一个群后填写，原作用域应在白名单中。映射会复用群记忆，但不会映射用户身份；不要把不同群合并。">
+            <Textarea rows={3} aria-label="同一群的会话映射"
+              placeholder="qq_official:GroupMessage:新群ID=default:GroupMessage:原群ID"
+              value={(cfg.scope_aliases || []).join("\n")}
+              onChange={(e) => patch("scope_aliases", e.target.value.split("\n"))} />
+          </Field>
         </section>
         <section className="memory-card space-y-5">
           <h2 className="font-medium">模型与索引</h2>
@@ -1026,7 +1109,7 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
         </section>
         <section className="memory-card space-y-5">
           <h2 className="font-medium">System One 候选排序（可选）</h2>
-          <p className="subtle">Jev / Clef 只辅助排序，不生成记忆，也不直接接受或删除候选。失败不重试，继续由辅助模型核验；开启后会增加决策模型调用。</p>
+          <p className="subtle">System One 模型只辅助排序，不生成记忆，也不直接接受或删除候选。失败不重试，继续由辅助模型核验；开启后会增加决策模型调用。</p>
           <div className="grid sm:grid-cols-2 gap-5">
             <Field title="System One 提供方" hint="只复用所选提供方的地址和密钥，不调用它的聊天模型。">
               <select aria-label="System One 提供方" value={cfg.systemone_provider_id}
@@ -1051,6 +1134,42 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
                 onChange={(e) => patch("systemone_timeout", Number(e.target.value))} />
             </Field>
           </div>
+        </section>
+        <section className="memory-card space-y-5">
+          <h2 className="font-medium">定时整理与软遗忘</h2>
+          <p className="subtle">默认每天一次，停用已过期、来源失效和完全重复的记忆，保留原文与修改历史。整理不会延长旧记忆的有效期，也不会仅因为很久没有召回就遗忘。</p>
+          <div className="grid sm:grid-cols-2 gap-5">
+            <Field title="定时整理">
+              <select aria-label="定时整理" value={String(cfg.maintenance_enabled ?? false)}
+                onChange={(e) => patch("maintenance_enabled", e.target.value === "true")}>
+                <option value="false">关闭定时整理</option>
+                <option value="true">开启定时整理与软遗忘</option>
+              </select>
+            </Field>
+            <Field title="整理间隔（小时）" hint="首次开启和修改间隔后，从新间隔开始排期。">
+              <Input aria-label="整理间隔（小时）" type="number" min={1} max={720} step={1} required
+                value={cfg.maintenance_interval_hours ?? 24}
+                onChange={(e) => patch("maintenance_interval_hours", Number(e.target.value))} />
+            </Field>
+            <Field title="语义复核" hint="开启后调用当前辅助模型检查低价值、后续更正和重复内容；有歧义或证据不足时保留。">
+              <select aria-label="语义复核" value={String(cfg.maintenance_semantic_enabled ?? false)}
+                onChange={(e) => patch("maintenance_semantic_enabled", e.target.value === "true")}>
+                <option value="false">关闭：仅运行确定性规则</option>
+                <option value="true">开启：使用当前辅助模型复核</option>
+              </select>
+            </Field>
+            <Field title="每 24 小时语义复核最多条数" hint="默认连续 24 小时最多 32 条和 4 次请求；立即执行、失败和重启共用限额。">
+              <Input aria-label="每 24 小时语义复核最多条数" type="number" min={1} max={128} step={1} required
+                value={cfg.maintenance_review_limit ?? 32}
+                onChange={(e) => patch("maintenance_review_limit", Number(e.target.value))} />
+            </Field>
+            <Field title="单批语义复核超时（秒）">
+              <Input type="number" min={5} max={120} step={1} required
+                value={cfg.maintenance_timeout ?? 45}
+                onChange={(e) => patch("maintenance_timeout", Number(e.target.value))} />
+            </Field>
+          </div>
+          <p className="subtle text-xs">保存后可在记忆库查看上次／下次整理时间，或先预览规则整理。规则预览不调用模型、不修改记忆。</p>
         </section>
         <section className="memory-card space-y-5">
           <h2 className="font-medium">处理与保留</h2>

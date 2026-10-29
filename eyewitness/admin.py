@@ -49,9 +49,21 @@ class AdminAPI:
                 "mode": cfg.mode,
                 "last_error": engine.last_error,
                 "last_cycle": engine.last_cycle,
+                "maintenance": {
+                    **await store.call("maintenance_status"),
+                    "running": engine.maintenance_lock.locked(),
+                    "latest": engine.last_maintenance,
+                },
                 "scopes": await store.call("list_scopes"),
-                "version": "0.1.24",
+                "version": "0.1.25",
             }
+        if route == "maintenance/preview" and method == "GET":
+            return await store.call("run_maintenance", force=True, dry_run=True)
+        if route == "maintenance/run" and method == "POST":
+            cfg = await store.call("get_settings")
+            if cfg.mode != "active" or not cfg.maintenance_enabled:
+                raise ValueError("请先启用定时整理")
+            return {"started": engine.start_maintenance()}
         if route == "providers" and method == "GET":
             return await self.providers() if self.providers else {"chat": [], "embedding": []}
         if route == "settings" and method in ("GET", "PUT"):

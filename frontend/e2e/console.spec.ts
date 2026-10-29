@@ -217,3 +217,94 @@ test("manual failed-batch retry requires confirmation and cannot be duplicated",
   await page.getByRole("button", {name:"失败提取", exact:true}).click();
   await expect(page.getByText("没有失败批次。", {exact:true})).toBeVisible();
 });
+
+test("maintenance settings and same-group aliases persist without dropping existing options", async ({ page }) => {
+  await page.goto("/");
+  const original = await page.evaluate(async () => window.AstrBotPluginPage!.apiPost("api", { path: "settings" })) as Record<string, unknown>;
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByLabel("定时整理", { exact: true }).selectOption("true");
+  await page.getByLabel("整理间隔（小时）", { exact: true }).fill("24");
+  await page.getByLabel("语义复核", { exact: true }).selectOption("true");
+  await page.getByLabel("每 24 小时语义复核最多条数", { exact: true }).fill("16");
+  await page.getByLabel("单批语义复核超时（秒）", { exact: true }).fill("30");
+  await page.getByLabel("同一群的会话映射", { exact: true }).fill("\n  official:GroupMessage:new=demo:GroupMessage:10001  \n\n");
+  await expect(page.getByText("映射会复用群记忆，但不会映射用户身份", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "保存设置", exact: true }).click();
+  await expect(page.getByRole("status")).toHaveText("设置已保存");
+  await page.reload();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await expect(page.getByLabel("定时整理", { exact: true })).toHaveValue("true");
+  await expect(page.getByLabel("语义复核", { exact: true })).toHaveValue("true");
+  await expect(page.getByLabel("每 24 小时语义复核最多条数", { exact: true })).toHaveValue("16");
+  await expect(page.getByLabel("同一群的会话映射", { exact: true })).toHaveValue("official:GroupMessage:new=demo:GroupMessage:10001");
+  const saved = await page.evaluate(async () => window.AstrBotPluginPage!.apiPost("api", { path: "settings" })) as Record<string, unknown>;
+  expect(saved).toMatchObject({ maintenance_enabled: true, maintenance_interval_hours: 24, maintenance_semantic_enabled: true, maintenance_review_limit: 16, maintenance_timeout: 30 });
+  expect(saved.json_mode).toEqual(original.json_mode);
+  expect(saved.systemone_check_support).toEqual(original.systemone_check_support);
+  await page.evaluate(async original => {
+    const bridge = window.AstrBotPluginPage!;
+    const latest = await bridge.apiPost("api", { path: "settings" }) as Record<string, unknown>;
+    await bridge.apiPost("api", { path: "settings", method: "PUT", body: { ...original, revision: latest.revision } });
+  }, original);
+});
+
+test("maintenance preview is read-only and a started background run disables repeat action", async ({ page }) => {
+  let started = false;
+  let runCalls = 0;
+  await page.route("**/api/bridge", async route => {
+    const request = route.request().postDataJSON();
+    if (request.path === "maintenance/preview") {
+      expect(request.method).toBe("GET");
+      return route.fulfill({ json: { scanned: 12, counts: { disabled: 2, demoted_to_pending: 1 }, decisions: [
+        { id: "example", code: "expired", reason: "已超过原有有效期；停用且不延长有效期", to_status: "disabled" },
+      ] } });
+    }
+    if (request.path === "maintenance/run") {
+      expect(request.method).toBe("POST");
+      runCalls += 1; started = true;
+      return route.fulfill({ json: { started: true } });
+    }
+    if (request.path === "overview") {
+      const response = await route.fetch();
+      const body = await response.json();
+      return route.fulfill({ response, json: { ...body, maintenance: {
+        enabled: true, interval_hours: 24, next_due: 1893499200, last_success: 1893412800,
+        running: started, last_run: { scanned: 20, counts: { disabled: 3, demoted_to_pending: 1 } },
+        latest: { semantic: { reviewed: 8, forgotten: 1, uncertain: 2, calls: 1 } },
+      } } });
+    }
+    return route.continue();
+  });
+  await page.goto("/");
+  const card = page.getByRole("region", { name: "记忆定时整理状态" });
+  await expect(card).toContainText("最近扫描 20 条 · 停用 3 条 · 退回核验 1 条");
+  await expect(card).toContainText("歧义保留 2 条");
+  await card.getByRole("button", { name: "预览规则整理" }).click();
+  await expect(card).toContainText("预览扫描 12 条：拟停用 2 条，退回核验 1 条");
+  await expect(card).toContainText("尚未修改记忆，也未调用模型");
+  expect(runCalls).toBe(0);
+  page.once("dialog", dialog => dialog.accept());
+  await card.getByRole("button", { name: "立即整理", exact: true }).click();
+  await expect(card.getByRole("button", { name: "立即整理", exact: true })).toBeDisabled();
+  await expect(card).toContainText("整理已在后台开始");
+  expect(runCalls).toBe(1);
+});
+
+test("maintenance history displays readable reasons instead of internal actor identifiers", async ({ page }) => {
+  await page.route("**/api/bridge", async route => {
+    const path = route.request().postDataJSON()?.path as string;
+    if (!path?.startsWith("memories/")) return route.continue();
+    const response = await route.fetch();
+    const data = await response.json();
+    await route.fulfill({ response, json: { ...data, versions: [
+      { version: 3, actor: "scheduled-semantic:superseded:原作者已明确取消这个计划", snapshot: JSON.stringify(data), created: 1893412800 },
+      { version: 2, actor: "maintenance:internal-run-id:expired", snapshot: JSON.stringify(data), created: 1893412700 },
+      ...data.versions,
+    ] } });
+  });
+  await page.goto("/");
+  await page.getByRole("button").filter({ hasText: "咖啡" }).click();
+  await expect(page.getByText("定时整理 · 已超过原有有效期", { exact: false })).toBeVisible();
+  await expect(page.getByText("定时复核 · 原作者已明确取消这个计划", { exact: false })).toBeVisible();
+  await expect(page.getByText("internal-run-id", { exact: false })).toHaveCount(0);
+});
