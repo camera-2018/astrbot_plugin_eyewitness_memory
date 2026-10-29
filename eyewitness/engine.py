@@ -806,6 +806,13 @@ class Engine:
                 decision.update(actual_model=rel.model, relevance=rel.answers["relevance"])
                 if rel.answers["relevance"]["choice"] != "relevant":
                     return
+                if not cfg.systemone_check_support:
+                    # Advisory relevance only: the normal grounding pass still
+                    # verifies source evidence before anything can be injected.
+                    scores[mid] = rel.answers["relevance"]["probabilities"]["relevant"]
+                    decision["priority"] = scores[mid]
+                    decision["support_skipped"] = True
+                    return
                 source = await self.ask_systemone(
                     cfg,
                     "System One 原文初核",

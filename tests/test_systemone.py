@@ -365,3 +365,50 @@ async def test_http_failure_does_not_follow_redirect_or_retry(aiohttp_server, ki
         assert "secret-provider-error" not in str(caught.value)
     finally:
         await client.close()
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+async def test_relevance_only_uses_one_call_and_respects_final_grounding(store, accepted):
+    mid, source = await seed(store)
+    await enable(store, systemone_check_support=False, systemone_model="FastBrain-9B")
+    requests = []
+
+    async def decide(cfg, request):
+        requests.append(request)
+        assert set(request["questions"]) == {"relevance"}
+        return parse_reply(response(request), request)
+
+    final = answers(mid, source) if accepted else [
+        {"decisions": [{"id": mid, "action": "reject", "reason": "原文不支持"}]}
+    ]
+    model = Model(final)
+    result = await Engine(store, model, systemone=decide).recall(SCOPE, "绘画比赛", "alice")
+    assert bool(result["injection"]) == accepted
+    assert len(requests) == 1 and model.calls == 1
+    decision = result["systemone"]["decisions"][mid]
+    assert decision["priority"] == 0.9 and decision["support_skipped"]
+    assert "support" not in decision
+
+
+async def test_relevance_only_keeps_completed_scores_when_other_candidate_times_out(store):
+    cfg = await enable(store, systemone_check_support=False, systemone_timeout=0.2)
+    candidates, pool, contexts = [], [], {}
+    for sender in ("alice", "bob"):
+        mid, source = await seed(store, sender=sender)
+        candidates.append(await store.call("detail", mid, SCOPE))
+        pool.extend(await store.call("source_rows", SCOPE, [source]))
+        contexts[mid] = {source}
+
+    async def decide(cfg, request):
+        if request["state"]["memory"]["subject_id"] == "alice":
+            await asyncio.sleep(10)
+        return parse_reply(response(request), request)
+
+    result = {}
+    ranked = await Engine(store, Model([]), systemone=decide).prioritize(
+        cfg, candidates, pool, contexts, "绘画比赛", "bob", [], None, result,
+        deadline=asyncio.get_running_loop().time() + 2,
+    )
+    assert [m["subject_id"] for m in ranked] == ["bob", "alice"]
+    assert result["systemone"]["status"] == "partial"
+    assert len(ranked) == len(candidates)

@@ -30,6 +30,30 @@ class Store:
         self.last_batch_scope = ""
 
     async def call(self, name: str, *args, **kwargs):
+        if name == "finish_call":
+            # Final accounting must survive cancellation even while waiting for
+            # the DB lock. Preserve the known outcome instead of leaving running.
+            task = asyncio.create_task(self._call(name, *args, **kwargs))
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await self._drain_cancelled(task)
+                raise
+        return await self._call(name, *args, **kwargs)
+
+    @staticmethod
+    async def _drain_cancelled(task):
+        # Multiple nested timeouts/stop requests must not release the DB lock
+        # while a SQLite thread is still writing. Cancellation is re-raised by
+        # the caller once this bounded accounting operation has finished.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        return task.result()
+
+    async def _call(self, name: str, *args, **kwargs):
         async with self.lock:
             task = asyncio.create_task(asyncio.to_thread(getattr(self, name), *args, **kwargs))
             try:
@@ -37,7 +61,21 @@ class Store:
             except asyncio.CancelledError:
                 # A timeout cannot stop a running SQLite thread. Keep the lock until it
                 # finishes so another request cannot interleave on the same connection.
-                await task
+                result = await self._drain_cancelled(task)
+                if name == "record_call" and result:
+                    # The INSERT committed, but the engine never received its ID
+                    # and therefore cannot reach its own try/finally accounting.
+                    cleanup = asyncio.create_task(
+                        asyncio.to_thread(
+                            self.finish_call,
+                            result,
+                            "interrupted",
+                            None,
+                            (None, None, None),
+                            "调用登记期间被中断，未启动模型请求",
+                        )
+                    )
+                    await self._drain_cancelled(cleanup)
                 raise
 
     def open(self):

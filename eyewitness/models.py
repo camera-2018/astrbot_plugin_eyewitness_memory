@@ -18,6 +18,7 @@ class Settings(BaseModel):
     systemone_model: str = ""
     systemone_api_path: str = "/typesafe/v1/systemone"
     systemone_timeout: float = Field(default=3.0, ge=0.2, le=10)
+    systemone_check_support: bool = True
     qdrant_url: str = ""
     collection: str = "eyewitness_memory_v1"
     online_timeout: float = Field(default=30.0, ge=0.5, le=30)
