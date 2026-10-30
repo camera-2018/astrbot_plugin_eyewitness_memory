@@ -1,4 +1,4 @@
-"""Optional typed decisions. Advice changes order, never grants or denies injection."""
+"""Typed decisions: candidate advice only ranks; the optional gate routes recall."""
 
 from __future__ import annotations
 

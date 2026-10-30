@@ -237,3 +237,16 @@ flowchart TD
 有问题或建议，欢迎提交 [Issue](https://github.com/camera-2018/astrbot_plugin_eyewitness_memory/issues)。请提供脱敏日志，不要上传真实聊天数据库或 API Key。
 
 [MIT 许可证](LICENSE) · [第三方组件声明](THIRD_PARTY_NOTICES.md)
+
+### FastBrain 召回前置判断（v0.1.28）
+
+启用 `recall_gate_enabled` 后，先复用 System One 提供方和模型判断是否需要长期记忆。
+只有 `unneeded` 概率达到 `recall_gate_skip_probability`（默认 0.90）才跳过本轮问题理解、候选选择和核验，直接继续主聊天。
+`needed`、`uncertain`、低于阈值、接口未配置、非法响应和超时均继续原召回。模型概率不是经过校准的准确率。
+
+历史追问、人物指代、引用消息和可能被截断的近期上下文保守放行，不依赖分类器拦截。
+判断使用与原召回相同的最近最多六条纯文本上下文；不传图片或工具结果，也不复用主动插话提示词。
+默认开关关闭，需先评估自己的语言和聊天样本再开启。`recall_gate_timeout` 默认 1.5 秒（含排队），同时最多占剩余在线预算的五分之一，失败不重试。
+
+召回轨迹保存 `recall_gate` 的决策、概率、耗时和回退原因；模型调用统计单独记录「System One 召回需求」。
+这里的跳过只影响当前轮记忆召回，不停用采集、后台提取、定时整理，也不直接授权任何记忆注入。

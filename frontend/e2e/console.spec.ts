@@ -241,6 +241,8 @@ test("maintenance settings and same-group aliases persist without dropping exist
   expect(saved).toMatchObject({ maintenance_enabled: true, maintenance_interval_hours: 24, maintenance_semantic_enabled: true, maintenance_review_limit: 16, maintenance_timeout: 30 });
   expect(saved.json_mode).toEqual(original.json_mode);
   expect(saved.systemone_check_support).toEqual(original.systemone_check_support);
+  expect(saved.recall_gate_enabled).toEqual(original.recall_gate_enabled);
+  expect(saved.recall_gate_skip_probability).toEqual(original.recall_gate_skip_probability);
   await page.evaluate(async original => {
     const bridge = window.AstrBotPluginPage!;
     const latest = await bridge.apiPost("api", { path: "settings" }) as Record<string, unknown>;
@@ -325,4 +327,25 @@ test("maintenance history displays readable reasons instead of internal actor id
   await expect(page.getByText("定时整理 · 已超过原有有效期", { exact: false })).toBeVisible();
   await expect(page.getByText("定时复核 · 原作者已明确取消这个计划", { exact: false })).toBeVisible();
   await expect(page.getByText("internal-run-id", { exact: false })).toHaveCount(0);
+});
+
+
+test("recall gate can be configured without replacing the chat provider", async ({ page }) => {
+  await page.goto("/");
+  const original = await page.evaluate(async () => window.AstrBotPluginPage!.apiPost("api", { path: "settings" })) as Record<string, unknown>;
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByLabel("召回前置判断", { exact: true }).selectOption("true");
+  await page.getByRole("button", { name: "保存设置", exact: true }).click();
+  await expect(page.getByRole("status")).toHaveText("设置已保存");
+  await page.reload();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await expect(page.getByLabel("召回前置判断", { exact: true })).toHaveValue("true");
+  const saved = await page.evaluate(async () => window.AstrBotPluginPage!.apiPost("api", { path: "settings" })) as Record<string, unknown>;
+  expect(saved.provider_id).toEqual(original.provider_id);
+  expect(saved.recall_gate_skip_probability).toEqual(0.9);
+  await page.evaluate(async original => {
+    const bridge = window.AstrBotPluginPage!;
+    const latest = await bridge.apiPost("api", { path: "settings" }) as Record<string, unknown>;
+    await bridge.apiPost("api", { path: "settings", method: "PUT", body: { ...original, revision: latest.revision } });
+  }, original);
 });

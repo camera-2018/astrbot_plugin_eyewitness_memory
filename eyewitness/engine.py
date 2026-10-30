@@ -45,6 +45,7 @@ from .planning import (
     search_queries,
     shortlist_payload,
 )
+from .recall_gate import gate_request, guard_reason
 from .retrieval import (
     compact_review,
     conversation_hint,
@@ -561,6 +562,9 @@ class Engine:
     async def _recall(
         self, cfg, scope, query, sender_id, reply_id, visible, result, conversation, *, deadline
     ):
+        if await self.skip_recall(cfg, query, reply_id, conversation, result, deadline=deadline):
+            result["reason"] = "FastBrain 高置信度判断无需长期记忆，直接继续主聊天"
+            return result
         quoted = (
             await self.store.call("referenced_message", scope, reply_id, stored_key=True)
             if reply_id
@@ -869,6 +873,49 @@ class Engine:
             else:
                 result["candidates"][-1]["verification"] = "逐字证据缺失、越界或未覆盖直接来源"
         return result
+
+    async def skip_recall(self, cfg, query, reply_id, conversation, result, *, deadline):
+        """Only an explicit high-confidence negative can bypass recall; fail open."""
+        if not cfg.recall_gate_enabled:
+            return False
+        trace = {"status": "fallback", "skip": False, "model": cfg.systemone_model}
+        result["recall_gate"] = trace
+        if not self.systemone or not cfg.systemone_provider_id or not cfg.systemone_model:
+            trace["reason"] = "判断接口未配置，继续原召回"
+            return False
+        reason = guard_reason(query, reply_id, conversation)
+        if reason:
+            trace.update(status="protected", reason=reason, elapsed_ms=0)
+            return False
+        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+        # Leave at least 80% of the online budget for the original recall path.
+        seconds = min(cfg.recall_gate_timeout, remaining / 5)
+        if seconds < 0.2:
+            trace["reason"] = "余量不足，继续原召回"
+            return False
+        started = time.monotonic()
+        try:
+            async with asyncio.timeout(seconds):
+                reply = await self.ask_systemone(
+                    cfg, "System One 召回需求", gate_request(cfg, query, conversation)
+                )
+            answer = reply.answers["recall"]
+            skip = (
+                answer["choice"] == "unneeded"
+                and answer["probabilities"]["unneeded"] >= cfg.recall_gate_skip_probability
+            )
+            trace.update(
+                status="success",
+                choice=answer["choice"],
+                probabilities=answer["probabilities"],
+                skip=skip,
+            )
+            return skip
+        except Exception as exc:
+            trace["reason"] = "判断未完成，继续原召回：" + failure_detail(exc)
+            return False
+        finally:
+            trace["elapsed_ms"] = round((time.monotonic() - started) * 1000)
 
     async def ask_systemone(self, cfg, stage, body):
         cid = await self.store.call("record_call", stage, len(json.dumps(body, ensure_ascii=False)))

@@ -53,7 +53,7 @@
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "只复用所选提供方的地址与密钥，不调用它的聊天模型。留空关闭；用于候选排序，不直接接受或丢弃记忆。"
+    "hint": "复用地址与密钥用于候选排序及可选召回前置判断，不调用该提供方的聊天模型。"
   },
   "systemone_check_support": {
     "description": "System One 原文初核",
@@ -295,5 +295,33 @@
       "max": 120,
       "step": 1
     }
+  },
+  "recall_gate_enabled": {
+    "description": "FastBrain 召回前置判断",
+    "type": "bool",
+    "default": false,
+    "hint": "复用 System One 接口。仅高置信度无需长期记忆时跳过；不确定、异常和历史追问继续原召回。"
+  },
+  "recall_gate_timeout": {
+    "description": "召回前置判断超时（秒）",
+    "type": "float",
+    "default": 1.5,
+    "slider": {
+      "min": 0.2,
+      "max": 3,
+      "step": 0.1
+    },
+    "hint": "包含排队，超时不重试，继续原召回。"
+  },
+  "recall_gate_skip_probability": {
+    "description": "跳过召回最低概率",
+    "type": "float",
+    "default": 0.9,
+    "slider": {
+      "min": 0.9,
+      "max": 1.0,
+      "step": 0.01
+    },
+    "hint": "模型概率不是经过校准的准确率；历史、引用、指代不明的问题保守放行。"
   }
 }

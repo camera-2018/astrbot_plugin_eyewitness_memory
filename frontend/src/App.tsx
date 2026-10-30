@@ -1109,13 +1109,28 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
           </Button>
         </section>
         <section className="memory-card space-y-5">
-          <h2 className="font-medium">System One 候选排序（可选）</h2>
-          <p className="subtle">System One 模型只辅助排序，不生成记忆，也不直接接受或删除候选。失败不重试，继续由辅助模型核验；开启后会增加决策模型调用。</p>
+          <h2 className="font-medium">System One 判断与排序（可选）</h2>
+          <p className="subtle">候选排序不直接接受或删除记忆。可另外开启召回前置判断：明确无需记忆才跳过，不确定或失败继续原召回。</p>
           <div className="grid sm:grid-cols-2 gap-5">
+            <Field title="召回前置判断" hint="复用下方接口；历史追问、引用与指代不明的问题保守放行。">
+              <select aria-label="召回前置判断" value={String(cfg.recall_gate_enabled ?? false)}
+                onChange={(e) => patch("recall_gate_enabled", e.target.value === "true")}>
+                <option value="false">关闭</option>
+                <option value="true">开启：明确无需记忆时跳过</option>
+              </select>
+            </Field>
+            <Field title="前置判断超时（秒）" hint="包含排队，超时继续原召回。">
+              <Input type="number" min={0.2} max={3} step={0.1} required value={cfg.recall_gate_timeout ?? 1.5}
+                onChange={(e) => patch("recall_gate_timeout", Number(e.target.value))} />
+            </Field>
+            <Field title="跳过召回最低概率" hint="模型概率不是经过校准的准确率。">
+              <Input type="number" min={0.9} max={1} step={0.01} required value={cfg.recall_gate_skip_probability ?? 0.9}
+                onChange={(e) => patch("recall_gate_skip_probability", Number(e.target.value))} />
+            </Field>
             <Field title="System One 提供方" hint="只复用所选提供方的地址和密钥，不调用它的聊天模型。">
               <select aria-label="System One 提供方" value={cfg.systemone_provider_id}
                 onChange={(e) => patch("systemone_provider_id", e.target.value)}>
-                <option value="">关闭 System One 排序</option>
+                <option value="">关闭 System One</option>
                 {cfg.systemone_provider_id && !providers.chat.includes(cfg.systemone_provider_id) && (
                   <option value={cfg.systemone_provider_id}>{cfg.systemone_provider_id}（当前不可用）</option>
                 )}
