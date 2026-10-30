@@ -1112,7 +1112,7 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
           <h2 className="font-medium">System One 判断与排序（可选）</h2>
           <p className="subtle">候选排序不直接接受或删除记忆。可另外开启召回前置判断：明确无需记忆才跳过，不确定或失败继续原召回。</p>
           <div className="grid sm:grid-cols-2 gap-5">
-            <Field title="召回前置判断" hint="复用下方接口；历史追问、引用与指代不明的问题保守放行。">
+            <Field title="召回前置判断" hint="复用下方接口，直接按三分类分流；不需要则跳过，需要／不确定继续。">
               <select aria-label="召回前置判断" value={String(cfg.recall_gate_enabled ?? false)}
                 onChange={(e) => patch("recall_gate_enabled", e.target.value === "true")}>
                 <option value="false">关闭</option>
@@ -1122,10 +1122,6 @@ function SettingsPage({ refresh }: { refresh: () => Promise<void> }) {
             <Field title="前置判断超时（秒）" hint="包含排队，超时继续原召回。">
               <Input type="number" min={0.2} max={3} step={0.1} required value={cfg.recall_gate_timeout ?? 1.5}
                 onChange={(e) => patch("recall_gate_timeout", Number(e.target.value))} />
-            </Field>
-            <Field title="跳过召回最低概率" hint="模型概率不是经过校准的准确率。">
-              <Input type="number" min={0.9} max={1} step={0.01} required value={cfg.recall_gate_skip_probability ?? 0.9}
-                onChange={(e) => patch("recall_gate_skip_probability", Number(e.target.value))} />
             </Field>
             <Field title="System One 提供方" hint="只复用所选提供方的地址和密钥，不调用它的聊天模型。">
               <select aria-label="System One 提供方" value={cfg.systemone_provider_id}

@@ -115,7 +115,6 @@ export type Settings = {
   systemone_timeout: number;
   recall_gate_enabled?: boolean;
   recall_gate_timeout?: number;
-  recall_gate_skip_probability?: number;
   qdrant_url: string;
   collection: string;
   online_timeout: number;

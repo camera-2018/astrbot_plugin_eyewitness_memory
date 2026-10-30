@@ -300,7 +300,7 @@
     "description": "FastBrain 召回前置判断",
     "type": "bool",
     "default": false,
-    "hint": "复用 System One 接口。仅高置信度无需长期记忆时跳过；不确定、异常和历史追问继续原召回。"
+    "hint": "复用 System One 接口，直接按三分类分流：不需要则跳过，需要／不确定继续原召回；异常超时也继续。"
   },
   "recall_gate_timeout": {
     "description": "召回前置判断超时（秒）",
@@ -312,16 +312,5 @@
       "step": 0.1
     },
     "hint": "包含排队，超时不重试，继续原召回。"
-  },
-  "recall_gate_skip_probability": {
-    "description": "跳过召回最低概率",
-    "type": "float",
-    "default": 0.9,
-    "slider": {
-      "min": 0.9,
-      "max": 1.0,
-      "step": 0.01
-    },
-    "hint": "模型概率不是经过校准的准确率；历史、引用、指代不明的问题保守放行。"
   }
 }

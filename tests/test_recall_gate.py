@@ -4,7 +4,6 @@ import time
 import pytest
 
 from eyewitness.engine import Engine
-from eyewitness.recall_gate import guard_reason
 from eyewitness.systemone import parse_reply
 from tests.conftest import SCOPE, seed
 from tests.test_engine import Model, answers
@@ -34,8 +33,9 @@ async def setup(store, choice="unneeded", p=0.99, error=None):
     return cfg, systemone, calls
 
 
-async def test_negative_skips_all_gemini_and_still_records_trace(store):
-    cfg, systemone, calls = await setup(store)
+@pytest.mark.parametrize("p", [0.34, 0.51, 0.89, 0.99])
+async def test_negative_skips_all_gemini_and_still_records_trace(store, p):
+    cfg, systemone, calls = await setup(store, p=p)
 
     async def forbidden(*args):
         pytest.fail("Gemini must not be called")
@@ -51,7 +51,6 @@ async def test_negative_skips_all_gemini_and_still_records_trace(store):
     [
         ("needed", 0.99, None),
         ("uncertain", 0.99, None),
-        ("unneeded", 0.89, None),
         ("unneeded", 0.99, "timeout"),
         ("unneeded", 0.99, "invalid"),
         ("unneeded", 0.99, "network"),
@@ -91,18 +90,36 @@ async def test_cancellation_is_not_swallowed(store):
         ("哈哈哈", "", [{"text": "x" * 1200}]),
     ],
 )
-def test_history_quotes_and_truncation_protected(query, reply, conversation):
-    assert guard_reason(query, reply, conversation)
-
-
-async def test_protected_query_does_not_call_gate(store):
-    _, systemone, calls = await setup(store)
+async def test_keywords_and_quotes_are_classified_not_rule_bypassed(
+    store, query, reply, conversation
+):
+    cfg, systemone, calls = await setup(store, p=0.51)
     engine = Engine(store, Model([]), systemone=systemone)
-    result = {}
-    skip = await engine.skip_recall(
-        await store.call("get_settings"), "我是谁", "", [], result, deadline=time.monotonic() + 30
+    r = {}
+    assert await engine.skip_recall(
+        cfg, query, reply, conversation, r, deadline=time.monotonic() + 30
     )
-    assert not skip and not calls and result["recall_gate"]["status"] == "protected"
+    assert len(calls) == 1 and r["recall_gate"]["choice"] == "unneeded"
+    assert calls[0]["state"]["current_message"] == query
+    assert calls[0]["state"]["recent_conversation"] == conversation
+    if reply:
+        assert calls[0]["state"]["has_reference"] is True
+        assert calls[0]["state"]["quoted_message"] is None
+
+
+async def test_quote_text_reaches_classifier(store):
+    cfg, systemone, calls = await setup(store, choice="uncertain")
+    r = {}
+    assert not await Engine(store, Model([]), systemone=systemone).skip_recall(
+        cfg,
+        "看看这个",
+        "reply",
+        [],
+        r,
+        deadline=time.monotonic() + 30,
+        quoted={"text": "我计划参加比赛", "sender_id": "alice"},
+    )
+    assert calls[0]["state"]["quoted_message"]["text"] == "我计划参加比赛"
 
 
 async def test_disabled_and_missing_provider_fail_open(store):

@@ -242,7 +242,7 @@ test("maintenance settings and same-group aliases persist without dropping exist
   expect(saved.json_mode).toEqual(original.json_mode);
   expect(saved.systemone_check_support).toEqual(original.systemone_check_support);
   expect(saved.recall_gate_enabled).toEqual(original.recall_gate_enabled);
-  expect(saved.recall_gate_skip_probability).toEqual(original.recall_gate_skip_probability);
+  expect(saved).not.toHaveProperty("recall_gate_skip_probability");
   await page.evaluate(async original => {
     const bridge = window.AstrBotPluginPage!;
     const latest = await bridge.apiPost("api", { path: "settings" }) as Record<string, unknown>;
@@ -342,7 +342,7 @@ test("recall gate can be configured without replacing the chat provider", async 
   await expect(page.getByLabel("召回前置判断", { exact: true })).toHaveValue("true");
   const saved = await page.evaluate(async () => window.AstrBotPluginPage!.apiPost("api", { path: "settings" })) as Record<string, unknown>;
   expect(saved.provider_id).toEqual(original.provider_id);
-  expect(saved.recall_gate_skip_probability).toEqual(0.9);
+  expect(saved).not.toHaveProperty("recall_gate_skip_probability");
   await page.evaluate(async original => {
     const bridge = window.AstrBotPluginPage!;
     const latest = await bridge.apiPost("api", { path: "settings" }) as Record<string, unknown>;
