@@ -11,7 +11,13 @@ from tests.test_systemone import enable
 
 
 def gate_response(body, choice="unneeded", p=0.99, signal="none", form="standalone"):
-    choices = {"recall": choice, "memory_signal": signal, "query_form": form}
+    choices = {
+        "recall": choice,
+        "memory_signal": signal,
+        "query_form": form,
+        "context_source": "uncertain",
+        "search_focus": "other",
+    }
     return {
         "model": body["model"],
         "answers": {
@@ -45,7 +51,25 @@ async def setup(store, choice="unneeded", p=0.99, error=None, signal="none", for
             return parse_reply({}, body)
         if error == "network":
             raise ConnectionError("test")
-        raw = gate_response(body, choice, p, signal, form)
+        if "recall" in body["questions"]:
+            raw = gate_response(body, choice, p, signal, form)
+        else:
+            options = body["questions"]["select"]["criteria"]
+            chosen = next(k for k in options if k != "none")
+            raw = {
+                "model": body["model"],
+                "answers": {
+                    "select": {
+                        "type": "choice",
+                        "choice": chosen,
+                        "confidence": 0.9,
+                        "probabilities": {
+                            k: 0.9 if k == chosen else 0.1 / (len(options) - 1) for k in options
+                        },
+                    }
+                },
+                "usage": {"input_tokens": 123, "output_tokens": 0},
+            }
         return parse_reply(raw, body)
 
     return cfg, systemone, calls
@@ -191,3 +215,49 @@ async def test_incomplete_multihead_response_fails_open(store):
         cfg, "你好", "", [], r, deadline=time.monotonic() + 30
     )
     assert r["recall_gate"]["status"] == "fallback"
+
+
+async def test_specific_search_focus_overrides_negative_recall_gate(store):
+    cfg, _, _ = await setup(store)
+    cfg = cfg.model_copy(update={"recall_fast_path_enabled": True})
+
+    async def classify(cfg, body):
+        raw = gate_response(body)
+        options = body["questions"]["search_focus"]["criteria"]
+        raw["answers"]["search_focus"] = {
+            "type": "choice",
+            "choice": "identity",
+            "confidence": 0.9,
+            "probabilities": {
+                k: 0.9 if k == "identity" else 0.1 / (len(options) - 1) for k in options
+            },
+        }
+        return parse_reply(raw, body)
+
+    r = {}
+    assert not await Engine(store, Model([]), systemone=classify).skip_recall(
+        cfg, "介绍这位群友的身世", "", [], r, deadline=time.monotonic() + 3
+    )
+    assert r["recall_gate"]["search_focus"] == "identity"
+
+
+@pytest.mark.parametrize("focus", ["other", "uncertain"])
+async def test_no_specific_search_focus_does_not_force_clear_chitchat_to_recall(store, focus):
+    cfg, _, _ = await setup(store)
+    cfg = cfg.model_copy(update={"recall_fast_path_enabled": True})
+
+    async def classify(cfg, body):
+        raw = gate_response(body)
+        options = body["questions"]["search_focus"]["criteria"]
+        raw["answers"]["search_focus"] = {
+            "type": "choice",
+            "choice": focus,
+            "confidence": 0.9,
+            "probabilities": {k: 0.9 if k == focus else 0.1 / (len(options) - 1) for k in options},
+        }
+        return parse_reply(raw, body)
+
+    r = {}
+    assert await Engine(store, Model([]), systemone=classify).skip_recall(
+        cfg, "晚上好", "", [], r, deadline=time.monotonic() + 3
+    )

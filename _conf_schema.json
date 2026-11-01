@@ -325,9 +325,9 @@
     }
   },
   "recall_fast_path_enabled": {
-    "description": "召回减少重复判断",
+    "description": "FastBrain 检索规划与候选筛选",
     "type": "bool",
     "default": false,
-    "hint": "对象明确时不改写问题；候选不超过3条直接核验原文；省去候选筛选后的重复FastBrain排序。"
+    "hint": "原问题始终检索，FastBrain选择已有上文并批量给候选排序。失败保留本地排序；Gemini仅做最终原文核验。"
   }
 }

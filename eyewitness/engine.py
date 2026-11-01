@@ -24,6 +24,13 @@ from .errors import (
 )
 from .evidence import source_quote
 from .extraction import compact_message, pack_extraction
+from .fastbrain_planning import (
+    FOCUS_TERMS,
+    diverse_verified,
+    plan_queries,
+    select_ranked,
+    selection_requests,
+)
 from .json_output import parse_output
 from .models import (
     CandidateShortlist,
@@ -653,25 +660,15 @@ class Engine:
             "quoted_message": context_message(quoted) if quoted else None,
         }
         gate = result.get("recall_gate", {})
-        if (
-            cfg.recall_fast_path_enabled
-            and gate.get("status") == "success"
-            and gate.get("query_form") == "standalone"
-            and gate.get("form_probabilities", {}).get("standalone", 0) >= 0.85
-            and not reply_id
-        ):
-            queries = [search_query]
-            result["understanding"] = {
-                "status": "direct",
-                "queries": [],
-                "reason": "FastBrain 判断检索对象明确，直接检索原问题",
-            }
+        if cfg.recall_fast_path_enabled:
+            queries, result["understanding"] = plan_queries(cfg, search_query, conversation, gate)
         else:
             queries = await self.understand(cfg, request, search_query, result, deadline=deadline)
-        if result["understanding"]["status"] == "success":
+        if result["understanding"]["status"] in ("success", "fastbrain", "local_fallback"):
             request["understanding"] = {
                 "queries": queries[1:],
                 "interpretation": result["understanding"]["reason"],
+                "search_focus": result["understanding"].get("search_focus"),
             }
         lexical = merge_rankings(*[await self.store.call("search", scope, q) for q in queries])
         contextual = await self.store.call("search", scope, context_query) if context_query else []
@@ -755,6 +752,10 @@ class Engine:
                 "selected": [m["id"] for m in ranked],
                 "reason": "候选不超过3条，直接核验原文",
             }
+        elif cfg.recall_fast_path_enabled:
+            candidates = await self.fastbrain_candidates(
+                cfg, ranked, request, result, deadline=deadline
+            )
         else:
             candidates = await self.choose_candidates(
                 cfg, ranked, {**request, "queries": queries}, result, deadline=deadline
@@ -806,7 +807,13 @@ class Engine:
             else:
                 result["candidates"].extend(review["candidates"])
                 result["selected"].extend(review["selected"])
-        result["selected"] = result["selected"][:2]
+        if (
+            cfg.recall_fast_path_enabled
+            and result["understanding"].get("search_focus") == "identity"
+        ):
+            result["selected"] = diverse_verified(result["selected"])
+        else:
+            result["selected"] = result["selected"][:2]
         if errors:
             result["review_errors"] = errors
             if not result["candidates"]:
@@ -841,6 +848,54 @@ class Engine:
             trace.update(status="fallback", reason=failure_detail(exc))
             self.report("问题理解失败，保留原问题检索：" + trace["reason"])
             return [original]
+
+    async def fastbrain_candidates(self, cfg, ranked, request, result, *, deadline):
+        pool = ranked[: cfg.candidate_pool_size]
+        trace = {"status": "running", "pool_ids": [m["id"] for m in pool], "decisions": {}}
+        result["selection"] = trace
+        result["stage"] = "FastBrain 候选筛选"
+        started = time.monotonic()
+        errors = []
+
+        async def classify(body, aliases):
+            try:
+                reply = await self.ask_systemone(cfg, "System One 候选筛选", body)
+                probs = reply.answers["select"]["probabilities"]
+                trace["decisions"].update(
+                    {
+                        mid: {
+                            "probability": probs[alias],
+                            "none_probability": probs["none"],
+                            "ranking_score": probs[alias] * (len(aliases) + 1),
+                        }
+                        for alias, mid in aliases.items()
+                    }
+                )
+            except Exception as exc:
+                errors.append(failure_detail(exc))
+
+        try:
+            if not self.systemone or not cfg.systemone_provider_id or not cfg.systemone_model:
+                raise AuxiliaryModelFailure("未配置 FastBrain，使用本地排序")
+            batches = selection_requests(cfg, pool, request)
+            remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+            async with asyncio.timeout(min(cfg.systemone_timeout, remaining / 3)):
+                await asyncio.gather(*(classify(body, aliases) for body, aliases in batches))
+        except Exception as exc:
+            errors.append(failure_detail(exc))
+        selected = select_ranked(pool, trace["decisions"], cfg.source_review_limit)
+        trace.update(
+            status="partial"
+            if errors and trace["decisions"]
+            else "fallback"
+            if errors
+            else "success",
+            backend="fastbrain",
+            selected=[m["id"] for m in selected],
+            elapsed_ms=round((time.monotonic() - started) * 1000),
+            errors=errors,
+        )
+        return selected
 
     async def choose_candidates(self, cfg, ranked, request, result, *, deadline):
         payload, aliases = shortlist_payload(
@@ -1001,11 +1056,19 @@ class Engine:
             skip = (
                 answer["choice"] == "unneeded"
                 and answer["probabilities"]["unneeded"] >= cfg.recall_skip_confidence
+                and (
+                    not cfg.recall_fast_path_enabled
+                    or reply.answers.get("search_focus", {}).get("choice") not in FOCUS_TERMS
+                )
                 and signal["choice"] == "none"
                 and form["choice"] == "standalone"
                 and not (reply_id and not quoted)
             )
+            context = reply.answers.get("context_source", {})
             trace.update(
+                search_focus=reply.answers.get("search_focus", {}).get("choice"),
+                context_choice=context.get("choice"),
+                context_probabilities=context.get("probabilities", {}),
                 memory_signal=signal["choice"],
                 signal_probabilities=signal["probabilities"],
                 query_form=form["choice"],

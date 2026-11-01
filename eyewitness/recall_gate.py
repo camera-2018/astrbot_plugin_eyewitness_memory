@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .fastbrain_planning import context_question, focus_question
+
 
 def gate_request(cfg, query: str, conversation: list, reply_id="", quoted=None) -> dict:
     state = {"current_message": query, "recent_conversation": conversation}
@@ -10,7 +12,7 @@ def gate_request(cfg, query: str, conversation: list, reply_id="", quoted=None) 
         state["quoted_message"] = (
             {"text": quoted["text"][:1500], "sender_id": quoted["sender_id"]} if quoted else None
         )
-    return {
+    body = {
         "model": cfg.systemone_model,
         "state": state,
         "questions": {
@@ -67,3 +69,9 @@ def gate_request(cfg, query: str, conversation: list, reply_id="", quoted=None) 
             },
         },
     }
+
+    if cfg.recall_fast_path_enabled:
+        body["questions"]["search_focus"] = focus_question()
+    if cfg.recall_fast_path_enabled and conversation:
+        body["questions"]["context_source"] = context_question(conversation)
+    return body

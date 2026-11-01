@@ -17,8 +17,8 @@ from tests.test_systemone import enable
     "form,expected",
     [
         ("standalone", ["GroundedReview"]),
-        ("contextual", ["QueryPlan", "GroundedReview"]),
-        ("uncertain", ["QueryPlan", "GroundedReview"]),
+        ("contextual", ["GroundedReview"]),
+        ("uncertain", ["GroundedReview"]),
     ],
 )
 async def test_function_routing_removes_only_redundant_calls(store, form, expected):
@@ -37,11 +37,14 @@ async def test_low_confidence_standalone_still_expands_query(store):
     await enable(store, recall_fast_path_enabled=True)
     await seed(store)
     model = PlanningModel(["alice 绘画比赛"])
-    await Engine(store, model, systemone=classify).recall(SCOPE, "她的那个安排")
-    assert model.requests[0]["schema"]["title"] == "QueryPlan"
+    r = await Engine(store, model, systemone=classify).recall(
+        SCOPE, "她的那个安排", conversation=[{"role": "user", "content": "alice要参加绘画比赛"}]
+    )
+    assert "alice要参加绘画比赛" in r["retrieval"]["queries"][1]
+    assert model.requests[0]["schema"]["title"] == "GroundedReview"
 
 
-async def test_wide_candidate_pool_keeps_gemini_shortlist(store):
+async def test_wide_candidate_pool_uses_fastbrain_shortlist(store):
     _, classify, calls = await setup(store, choice="needed", signal="history")
     await enable(store, recall_fast_path_enabled=True)
     for i in range(5):
@@ -49,8 +52,9 @@ async def test_wide_candidate_pool_keeps_gemini_shortlist(store):
     model = PlanningModel()
     r = await Engine(store, model, systemone=classify).recall(SCOPE, "绘画比赛各组")
     stages = [x["schema"]["title"] for x in model.requests]
-    assert stages[0] == "CandidateShortlist" and "GroundedReview" in stages
-    assert len(calls) == 1 and r["injection"]
+    assert all(s == "GroundedReview" for s in stages)
+    assert len(calls) == 2 and r["injection"]
+    assert r["selection"]["backend"] == "fastbrain" and r["selection"]["status"] == "success"
 
 
 @pytest.mark.parametrize("kind", ["reject", "invented_quote"])
