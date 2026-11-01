@@ -143,7 +143,13 @@ async def test_keywords_and_quotes_are_classified_not_rule_bypassed(
     )
     assert len(calls) == 1 and r["recall_gate"]["choice"] == "unneeded"
     assert calls[0]["state"]["current_message"] == query
-    assert calls[0]["state"]["recent_conversation"] == conversation
+    sent = calls[0]["state"]["recent_conversation"]
+    if any(len(r["text"]) > 240 for r in conversation):
+        assert calls[0]["state"]["context_truncated"] is True
+        assert sent[0]["text"].startswith(conversation[0]["text"][:160])
+        assert sent[0]["text"].endswith(conversation[0]["text"][-80:])
+    else:
+        assert sent == conversation
     if reply:
         assert calls[0]["state"]["has_reference"] is True
         assert calls[0]["state"]["quoted_message"] is None
@@ -315,3 +321,34 @@ async def test_three_second_gate_accepts_reply_after_old_two_second_limit(store)
     )
     assert result["recall_gate"]["status"] == "success"
     assert result["recall_gate"]["elapsed_ms"] >= 2000
+
+
+def test_gate_compacts_background_without_losing_retrieval_context_or_quote():
+    from copy import deepcopy
+
+    from eyewitness.fastbrain_planning import plan_queries
+    from eyewitness.models import Settings
+    from eyewitness.recall_gate import gate_request
+
+    cfg = Settings(recall_fast_path_enabled=True)
+    text = "小陈的设备升级计划：" + "背景说明" * 200 + "最后改成下周再买显卡。"
+    conversation = [{"role": "user", "text": text}]
+    original = deepcopy(conversation)
+    quote = {"text": "他答应保留旧型号", "sender_id": "alice"}
+    body = gate_request(cfg, "他最后怎么改的？", conversation, "quote-1", quote)
+    compact = body["state"]["recent_conversation"][0]["text"]
+    assert len(compact) <= 250
+    assert compact.startswith("小陈的设备升级计划：")
+    assert compact.endswith("最后改成下周再买显卡。")
+    assert body["state"]["context_truncated"] is True
+    assert body["state"]["quoted_message"] == quote
+    assert conversation == original
+    assert body["questions"]["context_source"]["criteria"]["c1"] == "第1条：" + text[:48]
+    queries, _ = plan_queries(
+        cfg,
+        "他最后怎么改的？",
+        conversation,
+        {"context_choice": "c1", "context_probabilities": {"c1": 0.99}},
+    )
+    assert text[:250] in queries[-1]
+    assert "[…中段省略…]" not in queries[-1]
