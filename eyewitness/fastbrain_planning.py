@@ -38,6 +38,8 @@ def focus_question():
 
 
 def context_question(conversation):
+    # State retains complete messages. Short excerpts keep each option semantic:
+    # index-only choices can bias the classifier toward c1.
     return {
         "type": "choice",
         "instructions": (
@@ -48,10 +50,7 @@ def context_question(conversation):
         "criteria": {
             "none": "当前问题自身完整，不需要补充上文。",
             "uncertain": "可能需要上文，但无法可靠确定是哪一条。",
-            **{
-                f"c{i}": f"采用第{i}条上文：{r['text'][:100]}"
-                for i, r in enumerate(conversation, 1)
-            },
+            **{f"c{i}": f"第{i}条：{r['text'][:48]}" for i, r in enumerate(conversation, 1)},
         },
     }
 

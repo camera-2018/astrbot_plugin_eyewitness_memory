@@ -305,7 +305,7 @@
   "recall_gate_timeout": {
     "description": "召回前置判断超时（秒）",
     "type": "float",
-    "default": 1.5,
+    "default": 3.0,
     "slider": {
       "min": 0.2,
       "max": 3,

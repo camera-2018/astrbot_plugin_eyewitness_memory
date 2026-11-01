@@ -21,7 +21,7 @@ class Settings(BaseModel):
     systemone_timeout: float = Field(default=3.0, ge=0.2, le=10)
     systemone_check_support: bool = True
     recall_gate_enabled: bool = False
-    recall_gate_timeout: float = Field(default=1.5, ge=0.2, le=3)
+    recall_gate_timeout: float = Field(default=3.0, ge=0.2, le=3)
     recall_skip_confidence: float = Field(default=0.85, ge=0.5, le=1)
     recall_fast_path_enabled: bool = False
     qdrant_url: str = ""

@@ -261,3 +261,57 @@ async def test_no_specific_search_focus_does_not_force_clear_chitchat_to_recall(
     assert await Engine(store, Model([]), systemone=classify).skip_recall(
         cfg, "晚上好", "", [], r, deadline=time.monotonic() + 3
     )
+
+
+def test_compact_gate_preserves_context_and_reference_indices():
+    from eyewitness.fastbrain_planning import plan_queries
+    from eyewitness.models import Settings
+    from eyewitness.recall_gate import gate_request
+
+    cfg = Settings(recall_fast_path_enabled=True)
+    conversation = [
+        {"role": "user", "text": "小王买了显卡，预算不超过三千。"},
+        {"role": "assistant", "text": "相洋提过自己的 NAS 升级计划。"},
+    ]
+    quoted = {"text": "他说还要保留旧模型", "sender_id": "alice"}
+    body = gate_request(cfg, "他后来怎么改的？", conversation, "quote1", quoted)
+    assert body["state"]["recent_conversation"] == conversation
+    assert body["state"]["quoted_message"] == quoted
+    assert (
+        body["questions"]["context_source"]["criteria"]["c2"] == "第2条：" + conversation[1]["text"]
+    )
+    queries, _ = plan_queries(
+        cfg,
+        "他后来怎么改的？",
+        conversation,
+        {"context_choice": "c2", "context_probabilities": {"c2": 0.99}},
+    )
+    assert any(conversation[1]["text"] in q for q in queries)
+    assert not any(conversation[0]["text"] in q for q in queries)
+
+
+def test_gate_default_timeout_matches_schema():
+    import json
+    from pathlib import Path
+
+    from eyewitness.models import Settings
+
+    schema = json.loads((Path(__file__).parents[1] / "_conf_schema.json").read_text())
+    assert Settings().recall_gate_timeout == schema["recall_gate_timeout"]["default"] == 3.0
+
+
+async def test_three_second_gate_accepts_reply_after_old_two_second_limit(store):
+    cfg, _, _ = await setup(store)
+    cfg = cfg.model_copy(update={"recall_gate_timeout": 3.0})
+
+    async def slow_reply(cfg, body):
+        await asyncio.sleep(2.1)
+        return parse_reply(gate_response(body, choice="needed", signal="person"), body)
+
+    result = {}
+    engine = Engine(store, Model([]), systemone=slow_reply)
+    assert not await engine.skip_recall(
+        cfg, "我是谁", "", [], result, deadline=time.monotonic() + 30
+    )
+    assert result["recall_gate"]["status"] == "success"
+    assert result["recall_gate"]["elapsed_ms"] >= 2000
