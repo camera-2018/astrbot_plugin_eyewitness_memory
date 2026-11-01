@@ -7,7 +7,8 @@ import inspect
 import json
 import math
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
@@ -15,6 +16,7 @@ import aiohttp
 from .context import bounded_context
 from .errors import AuxiliaryModelFailure
 from .extraction import compact_message
+from .fastbrain_queue import is_fastbrain, priority_slot
 from .models import Settings
 
 
@@ -24,6 +26,9 @@ class SystemOneReply:
     answers: dict
     input_tokens: int
     output_tokens: int
+    queue_ms: int = 0
+    request_ms: int = 0
+    priority: str = "unmanaged"
 
 
 def endpoint(base: str, path: str) -> str:
@@ -122,7 +127,14 @@ class SystemOneClient:
         raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
         if len(raw) > 48000:
             raise AuxiliaryModelFailure("System One：单候选输入超出字节预算")
-        async with self.slots:
+        urgent = {"recall", "memory_signal", "query_form"}.issubset(body.get("questions", {}))
+        admission = (
+            priority_slot(url, cfg.systemone_model, urgent=urgent)
+            if cfg.fastbrain_priority_enabled and is_fastbrain(cfg.systemone_model)
+            else self.slots
+        )
+        async with admission as ticket:
+            started = time.monotonic()
             if self.session is None or self.session.closed:
                 self.session = aiohttp.ClientSession()
             try:
@@ -153,7 +165,12 @@ class SystemOneClient:
                     parsed = json.loads(data)
                 except (ValueError, UnicodeError) as exc:
                     raise AuxiliaryModelFailure("System One：响应不是有效 JSON") from exc
-                return parse_reply(parsed, body)
+                return replace(
+                    parse_reply(parsed, body),
+                    queue_ms=getattr(ticket, "wait_ms", 0),
+                    request_ms=round((time.monotonic() - started) * 1000),
+                    priority=getattr(ticket, "priority", "unmanaged"),
+                )
             except aiohttp.ClientError as exc:
                 # Never expose provider exception text, which can contain credentials/URLs.
                 raise AuxiliaryModelFailure("System One：网络连接失败，未重试") from exc

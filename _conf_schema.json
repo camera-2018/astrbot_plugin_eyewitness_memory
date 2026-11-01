@@ -329,5 +329,11 @@
     "type": "bool",
     "default": false,
     "hint": "原问题始终检索，FastBrain选择已有上文并批量给候选排序。失败保留本地排序；Gemini仅做最终原文核验。"
+  },
+  "fastbrain_priority_enabled": {
+    "description": "共享 FastBrain 优先队列（与另一插件同时开启）",
+    "type": "bool",
+    "default": false,
+    "hint": "相同 AstrBot 进程、接口和模型共用单请求队列；召回前置判断优先，连续3条后放行普通请求。不同进程或其他客户端不受此队列管理。"
   }
 }

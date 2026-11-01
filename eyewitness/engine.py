@@ -1066,6 +1066,9 @@ class Engine:
             )
             context = reply.answers.get("context_source", {})
             trace.update(
+                queue_ms=getattr(reply, "queue_ms", 0),
+                request_ms=getattr(reply, "request_ms", 0),
+                priority=getattr(reply, "priority", "unmanaged"),
                 search_focus=reply.answers.get("search_focus", {}).get("choice"),
                 context_choice=context.get("choice"),
                 context_probabilities=context.get("probabilities", {}),
