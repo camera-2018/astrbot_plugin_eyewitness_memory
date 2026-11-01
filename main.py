@@ -13,6 +13,7 @@ from astrbot.core.config import AstrBotConfig
 
 from .eyewitness.admin import AdminAPI
 from .eyewitness.budget import request_budget
+from .eyewitness.config import ConfigSettings
 from .eyewitness.context import history_markers, platform_time
 from .eyewitness.engine import Engine
 from .eyewitness.errors import failure_detail
@@ -148,7 +149,9 @@ class EyewitnessMemoryPlugin(Star):
         if not self.ready or not event.get_group_id():
             return
         try:
-            cfg = await self.store.call("get_settings")
+            # Native settings are already in memory; do not queue this early
+            # eligibility check behind SQLite before the engine deadline starts.
+            cfg = ConfigSettings(self.config).read()
             scope = canonical_scope(event.unified_msg_origin, cfg.scope_aliases)
             if cfg.mode == "off" or scope not in cfg.allowed_scopes:
                 return

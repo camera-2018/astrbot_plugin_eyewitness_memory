@@ -7,10 +7,31 @@ from eyewitness.engine import Engine
 from eyewitness.systemone import parse_reply
 from tests.conftest import SCOPE, seed
 from tests.test_engine import Model, answers
-from tests.test_systemone import enable, response
+from tests.test_systemone import enable
 
 
-async def setup(store, choice="unneeded", p=0.99, error=None):
+def gate_response(body, choice="unneeded", p=0.99, signal="none", form="standalone"):
+    choices = {"recall": choice, "memory_signal": signal, "query_form": form}
+    return {
+        "model": body["model"],
+        "answers": {
+            key: {
+                "type": "choice",
+                "choice": choices[key],
+                "confidence": p,
+                "probabilities": {
+                    o: p if o == choices[key] else (1 - p) / (len(q["criteria"]) - 1)
+                    for o in q["criteria"]
+                },
+            }
+            for key, q in body["questions"].items()
+        },
+        "usage": {"input_tokens": 123, "output_tokens": 0},
+    }
+
+
+async def setup(store, choice="unneeded", p=0.99, error=None, signal="none", form="standalone"):
+
     cfg = await enable(store, recall_gate_enabled=True, recall_gate_timeout=0.2)
     calls = []
 
@@ -24,16 +45,13 @@ async def setup(store, choice="unneeded", p=0.99, error=None):
             return parse_reply({}, body)
         if error == "network":
             raise ConnectionError("test")
-        raw = response(body, choice)
-        raw["answers"]["recall"]["probabilities"] = {
-            o: p if o == choice else (1 - p) / 2 for o in body["questions"]["recall"]["criteria"]
-        }
+        raw = gate_response(body, choice, p, signal, form)
         return parse_reply(raw, body)
 
     return cfg, systemone, calls
 
 
-@pytest.mark.parametrize("p", [0.34, 0.51, 0.89, 0.99])
+@pytest.mark.parametrize("p", [0.85, 0.89, 0.99])
 async def test_negative_skips_all_gemini_and_still_records_trace(store, p):
     cfg, systemone, calls = await setup(store, p=p)
 
@@ -96,7 +114,7 @@ async def test_keywords_and_quotes_are_classified_not_rule_bypassed(
     cfg, systemone, calls = await setup(store, p=0.51)
     engine = Engine(store, Model([]), systemone=systemone)
     r = {}
-    assert await engine.skip_recall(
+    assert not await engine.skip_recall(
         cfg, query, reply, conversation, r, deadline=time.monotonic() + 30
     )
     assert len(calls) == 1 and r["recall_gate"]["choice"] == "unneeded"
@@ -131,3 +149,45 @@ async def test_disabled_and_missing_provider_fail_open(store):
             cfg.model_copy(update=patch), "哈哈哈", "", [], r, deadline=time.monotonic() + 30
         )
     assert not calls
+
+
+@pytest.mark.parametrize(
+    "p,signal,form,reply",
+    [
+        (0.34, "none", "standalone", ""),
+        (0.84, "none", "standalone", ""),
+        (0.99, "person", "standalone", ""),
+        (0.99, "config", "standalone", ""),
+        (0.99, "history", "standalone", ""),
+        (0.99, "uncertain", "standalone", ""),
+        (0.99, "none", "contextual", ""),
+        (0.99, "none", "uncertain", ""),
+        (0.99, "none", "standalone", "missing-quote"),
+    ],
+)
+async def test_conflicting_heads_weak_negative_and_missing_quote_keep_recall(
+    store, p, signal, form, reply
+):
+    cfg, systemone, calls = await setup(store, p=p, signal=signal, form=form)
+    r = {}
+    assert not await Engine(store, Model([]), systemone=systemone).skip_recall(
+        cfg, "你还记得吗", reply, [], r, deadline=time.monotonic() + 30
+    )
+    assert len(calls) == 1
+    assert r["recall_gate"]["memory_signal"] == signal
+    assert r["recall_gate"]["query_form"] == form
+
+
+async def test_incomplete_multihead_response_fails_open(store):
+    cfg, _, _ = await setup(store)
+
+    async def missing_head(cfg, body):
+        raw = gate_response(body)
+        del raw["answers"]["memory_signal"]
+        return parse_reply(raw, body)
+
+    r = {}
+    assert not await Engine(store, Model([]), systemone=missing_head).skip_recall(
+        cfg, "你好", "", [], r, deadline=time.monotonic() + 30
+    )
+    assert r["recall_gate"]["status"] == "fallback"

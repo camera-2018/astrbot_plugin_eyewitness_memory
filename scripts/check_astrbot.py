@@ -127,7 +127,13 @@ async def check():
 
             req.extra_user_content_parts.append(TextPart(text="已有附加内容"))
             old_contexts = copy.deepcopy(req.contexts)
-            await plugin.recall(Event(), req)
+            # A blocked SQLite writer must not hold the hook's initial
+            # native-config eligibility check outside the engine deadline.
+            await plugin.store.lock.acquire()
+            try:
+                await asyncio.wait_for(plugin.recall(Event(), req), timeout=1)
+            finally:
+                plugin.store.lock.release()
             assert req.system_prompt == "固定系统提示词" and req.contexts == old_contexts
             assert req.prompt == "测试问题" and len(req.extra_user_content_parts) == 2
             assert req.extra_user_content_parts[0].text == "已有附加内容"

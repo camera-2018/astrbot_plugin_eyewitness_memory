@@ -101,6 +101,8 @@ REVIEW_INSTRUCTION = (
 
 
 class Engine:
+    _RECALL_HARD_TIMEOUT = 30.0
+
     _ERROR_PREFIXES = {
         "worker": "后台任务异常：",
         "extraction": "提取失败：",
@@ -130,6 +132,7 @@ class Engine:
         self.maintenance_task: asyncio.Task | None = None
         self.last_maintenance: dict = {}
         self.last_cycle = 0.0
+        self._pending: set[asyncio.Task] = set()
 
     @property
     def last_error(self) -> str:
@@ -161,12 +164,57 @@ class Engine:
             await self.vector.start()
         self.worker_task = asyncio.create_task(self.worker(), name="eyewitness-memory-worker")
 
+    def _track(self, task):
+        self._pending.add(task)
+
+        def done(t):
+            self._pending.discard(t)
+            if not t.cancelled() and t.exception():
+                self.report("异步收尾失败：" + failure_detail(t.exception()))
+
+        task.add_done_callback(done)
+        return task
+
+    async def _register_call(self, stage, size):
+        # Store owns its SQLite thread/lock. Cancellation must not keep the
+        # caller waiting for that thread, nor start inference after cancellation.
+        task = self._track(asyncio.create_task(self.store.call("record_call", stage, size)))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done() and not task.cancelled() and task.exception() is None:
+                # Cancellation can arrive after INSERT completed but before
+                # shield handed its result back to this coroutine.
+                self._track(
+                    asyncio.create_task(
+                        self.store.call(
+                            "finish_call",
+                            task.result(),
+                            "interrupted",
+                            None,
+                            (None, None, None),
+                            "登记完成时请求已中断，未调用模型",
+                        )
+                    )
+                )
+            else:
+                task.cancel()  # Store settles a committed insert as interrupted.
+            raise
+
+    async def _finish_call(self, *args):
+        task = self._track(asyncio.create_task(self.store.call("finish_call", *args)))
+        # Persist known outcomes even when the request is cancelled; bounded
+        # caller wait avoids turning a model timeout into a long DB-lock wait.
+        await asyncio.wait({task}, timeout=0.05)
+
     async def close(self):
         tasks = [t for t in (self.maintenance_task, self.worker_task) if t is not None]
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        while self._pending:
+            await asyncio.gather(*list(self._pending), return_exceptions=True)
         if self.vector:
             await self.vector.close()
 
@@ -189,7 +237,7 @@ class Engine:
         )
         if len(prompt) > 40000:
             raise AuxiliaryModelFailure(f"{stage}：输入超出字符预算")
-        cid = await self.store.call("record_call", stage, len(prompt))
+        cid = await self._register_call(stage, len(prompt))
         started = time.monotonic()
         usage, status, error = (None, None, None), "failed", ""
         try:
@@ -222,8 +270,8 @@ class Engine:
                 raise
             raise AuxiliaryModelFailure(f"{stage}：{error}") from exc
         finally:
-            await self.store.call(
-                "finish_call", cid, status, round((time.monotonic() - started) * 1000), usage, error
+            await self._finish_call(
+                cid, status, round((time.monotonic() - started) * 1000), usage, error
             )
 
     async def extract_once(self, cfg: Settings) -> bool:
@@ -396,7 +444,28 @@ class Engine:
                 self._report_error("worker", exc)
             await asyncio.sleep(30)
 
-    async def recall(
+    async def recall(self, *args, **kwargs):
+        # This supervisor is outside SQLite cancellation draining and the model
+        # accounting path. Unfinished work can never inject a late answer.
+        task = self._track(asyncio.create_task(self._recall_impl(*args, **kwargs)))
+        try:
+            done, _ = await asyncio.wait({task}, timeout=self._RECALL_HARD_TIMEOUT)
+            if done:
+                return task.result()
+            task.cancel()
+            self.report("记忆流程达到30秒总预算，已取消；收尾异步完成")
+            return {
+                "selected": [],
+                "injection": "",
+                "mode": "active",
+                "reason": "记忆流程达到总预算，未注入未完成的结果",
+                "elapsed_ms": 30000,
+            }
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+
+    async def _recall_impl(
         self,
         scope: str,
         query: str,
@@ -583,7 +652,22 @@ class Engine:
             "conversation": conversation,
             "quoted_message": context_message(quoted) if quoted else None,
         }
-        queries = await self.understand(cfg, request, search_query, result, deadline=deadline)
+        gate = result.get("recall_gate", {})
+        if (
+            cfg.recall_fast_path_enabled
+            and gate.get("status") == "success"
+            and gate.get("query_form") == "standalone"
+            and gate.get("form_probabilities", {}).get("standalone", 0) >= 0.85
+            and not reply_id
+        ):
+            queries = [search_query]
+            result["understanding"] = {
+                "status": "direct",
+                "queries": [],
+                "reason": "FastBrain 判断检索对象明确，直接检索原问题",
+            }
+        else:
+            queries = await self.understand(cfg, request, search_query, result, deadline=deadline)
         if result["understanding"]["status"] == "success":
             request["understanding"] = {
                 "queries": queries[1:],
@@ -664,9 +748,17 @@ class Engine:
                 "本地筛选未发现具体关联，未调用辅助模型" if skipped else "没有合适的历史候选"
             )
             return
-        candidates = await self.choose_candidates(
-            cfg, ranked, {**request, "queries": queries}, result, deadline=deadline
-        )
+        if cfg.recall_fast_path_enabled and len(ranked) <= min(3, cfg.source_review_limit):
+            candidates = ranked
+            result["selection"] = {
+                "status": "direct",
+                "selected": [m["id"] for m in ranked],
+                "reason": "候选不超过3条，直接核验原文",
+            }
+        else:
+            candidates = await self.choose_candidates(
+                cfg, ranked, {**request, "queries": queries}, result, deadline=deadline
+            )
         if not candidates:
             result["reason"] = "辅助模型未发现值得查证的相关候选"
             return
@@ -676,7 +768,9 @@ class Engine:
         candidates = [m for m in candidates if evidence[m["id"]]]
         pool = list({r["id"]: r for rows in evidence.values() for r in rows}.values())
         contexts = {mid: {r["id"] for r in rows} for mid, rows in evidence.items()}
-        if self.systemone and cfg.systemone_provider_id and cfg.systemone_model:
+        if cfg.recall_fast_path_enabled:
+            result["systemone"] = {"status": "skipped", "reason": "候选已筛选，直接核验原文"}
+        elif self.systemone and cfg.systemone_provider_id and cfg.systemone_model:
             candidates = await self.prioritize(
                 cfg,
                 candidates,
@@ -902,8 +996,21 @@ class Engine:
                     gate_request(cfg, query, conversation, reply_id, quoted),
                 )
             answer = reply.answers["recall"]
-            skip = answer["choice"] == "unneeded"
+            signal = reply.answers["memory_signal"]
+            form = reply.answers["query_form"]
+            skip = (
+                answer["choice"] == "unneeded"
+                and answer["probabilities"]["unneeded"] >= cfg.recall_skip_confidence
+                and signal["choice"] == "none"
+                and form["choice"] == "standalone"
+                and not (reply_id and not quoted)
+            )
             trace.update(
+                memory_signal=signal["choice"],
+                signal_probabilities=signal["probabilities"],
+                query_form=form["choice"],
+                form_probabilities=form["probabilities"],
+                skip_threshold=cfg.recall_skip_confidence,
                 status="success",
                 choice=answer["choice"],
                 probabilities=answer["probabilities"],
@@ -917,7 +1024,7 @@ class Engine:
             trace["elapsed_ms"] = round((time.monotonic() - started) * 1000)
 
     async def ask_systemone(self, cfg, stage, body):
-        cid = await self.store.call("record_call", stage, len(json.dumps(body, ensure_ascii=False)))
+        cid = await self._register_call(stage, len(json.dumps(body, ensure_ascii=False)))
         started = time.monotonic()
         usage, status, error = (None, None, None), "failed", ""
         try:
@@ -932,8 +1039,8 @@ class Engine:
             error = failure_detail(exc)
             raise
         finally:
-            await self.store.call(
-                "finish_call", cid, status, round((time.monotonic() - started) * 1000), usage, error
+            await self._finish_call(
+                cid, status, round((time.monotonic() - started) * 1000), usage, error
             )
 
     async def prioritize(
