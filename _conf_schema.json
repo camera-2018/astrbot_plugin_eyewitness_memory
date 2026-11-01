@@ -335,5 +335,11 @@
     "type": "bool",
     "default": false,
     "hint": "相同 AstrBot 进程、接口和模型共用单请求队列；召回前置判断优先，连续3条后放行普通请求。不同进程或其他客户端不受此队列管理。"
+  },
+  "systemone_decision_provider_id": {
+    "description": "AstrBot 官方 System One 决策提供商 ID",
+    "type": "string",
+    "default": "",
+    "hint": "在模型提供商→决策模型配置 System One，然后填其 ID。填写后使用 context.decision.ask，地址和密钥由核心管理；留空保留旧 HTTP 接法。需 AstrBot 4.29.4+，提供商模型名须与插件一致。"
   }
 }

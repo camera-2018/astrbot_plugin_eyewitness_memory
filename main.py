@@ -34,7 +34,9 @@ class EyewitnessMemoryPlugin(Star):
         self.data_dir = Path(StarTools.get_data_dir(PLUGIN))
         self.data_dir.chmod(0o700)  # Protect SQLite and its WAL/SHM files.
         self.store = Store(self.data_dir / "memory.sqlite3")
-        self.systemone = SystemOneClient(self.context.get_provider_by_id)
+        self.systemone = SystemOneClient(
+            self.context.get_provider_by_id, getattr(self.context, "decision", None)
+        )
         self.engine = Engine(
             self.store,
             self.generate,

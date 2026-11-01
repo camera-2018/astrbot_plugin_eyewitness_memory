@@ -771,7 +771,11 @@ class Engine:
         contexts = {mid: {r["id"] for r in rows} for mid, rows in evidence.items()}
         if cfg.recall_fast_path_enabled:
             result["systemone"] = {"status": "skipped", "reason": "候选已筛选，直接核验原文"}
-        elif self.systemone and cfg.systemone_provider_id and cfg.systemone_model:
+        elif (
+            self.systemone
+            and (cfg.systemone_provider_id or cfg.systemone_decision_provider_id)
+            and cfg.systemone_model
+        ):
             candidates = await self.prioritize(
                 cfg,
                 candidates,
@@ -875,7 +879,11 @@ class Engine:
                 errors.append(failure_detail(exc))
 
         try:
-            if not self.systemone or not cfg.systemone_provider_id or not cfg.systemone_model:
+            if (
+                not self.systemone
+                or not (cfg.systemone_provider_id or cfg.systemone_decision_provider_id)
+                or not cfg.systemone_model
+            ):
                 raise AuxiliaryModelFailure("未配置 FastBrain，使用本地排序")
             batches = selection_requests(cfg, pool, request)
             remaining = max(0.0, deadline - asyncio.get_running_loop().time())
@@ -1031,9 +1039,20 @@ class Engine:
         """Route directly by choice; uncertain and failures continue original recall."""
         if not cfg.recall_gate_enabled:
             return False
-        trace = {"status": "fallback", "skip": False, "model": cfg.systemone_model}
+        trace = {
+            "status": "fallback",
+            "skip": False,
+            "model": cfg.systemone_model,
+            "transport": "astrbot_decision"
+            if cfg.systemone_decision_provider_id
+            else "legacy_http",
+        }
         result["recall_gate"] = trace
-        if not self.systemone or not cfg.systemone_provider_id or not cfg.systemone_model:
+        if (
+            not self.systemone
+            or not (cfg.systemone_provider_id or cfg.systemone_decision_provider_id)
+            or not cfg.systemone_model
+        ):
             trace["reason"] = "判断接口未配置，继续原召回"
             return False
         remaining = max(0.0, deadline - asyncio.get_running_loop().time())

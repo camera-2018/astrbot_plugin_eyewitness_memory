@@ -160,12 +160,15 @@ async def exercise():
 
         memory, normal = await asyncio.gather(
             generate_once(context, "retry-test", "synthetic system", "memory"),
-            provider.text_chat(prompt="normal", max_tokens=3000, request_max_retries=1),
+            # 4.29.4 owns retries in the framework; the OpenAI SDK itself defaults to zero.
+            provider.text_chat(prompt="normal", max_tokens=3000, request_max_retries=3),
         )
         assert calls["memory"] == 1 and calls["normal"] == 3, dict(calls)
         assert memory.completion_text == normal.completion_text == "ok"
         assert ModelReply.from_response(memory).input_tokens == 12
-        print("PASS: concurrent normal chat retains SDK retries; response/usage/options preserved")
+        print(
+            "PASS: concurrent normal chat retains configured retries; response/usage/options preserved"
+        )
 
         task = asyncio.create_task(
             generate_once(context, "retry-test", "synthetic system", "cancel")

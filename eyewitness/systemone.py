@@ -18,14 +18,15 @@ from .errors import AuxiliaryModelFailure
 from .extraction import compact_message
 from .fastbrain_queue import is_fastbrain, priority_slot
 from .models import Settings
+from .native_decision import NativeDecisionClient, NativeDecisionFailure
 
 
 @dataclass(frozen=True)
 class SystemOneReply:
     model: str
     answers: dict
-    input_tokens: int
-    output_tokens: int
+    input_tokens: int | None
+    output_tokens: int | None
     queue_ms: int = 0
     request_ms: int = 0
     priority: str = "unmanaged"
@@ -105,12 +106,34 @@ def parse_reply(body: dict, request: dict) -> SystemOneReply:
 
 
 class SystemOneClient:
-    def __init__(self, resolve_provider):
+    def __init__(self, resolve_provider, decision_service=None):
         self.resolve_provider = resolve_provider
+        self.native = NativeDecisionClient(decision_service, resolve_provider)
         self.session: aiohttp.ClientSession | None = None
         self.slots = asyncio.Semaphore(2)
 
     async def call(self, cfg: Settings, body: dict) -> SystemOneReply:
+        if cfg.systemone_decision_provider_id:
+            try:
+                reply = await self.native.ask(
+                    cfg.systemone_decision_provider_id,
+                    body,
+                    timeout=cfg.systemone_timeout,
+                    urgent={"recall", "memory_signal", "query_form"}.issubset(body["questions"]),
+                    priority_enabled=cfg.fastbrain_priority_enabled,
+                )
+            except NativeDecisionFailure as exc:
+                raise AuxiliaryModelFailure("System One 官方接口：" + exc.reason) from None
+            # DecisionService does not expose token usage; NULL means unknown, not zero.
+            return SystemOneReply(
+                reply.model,
+                reply.answers,
+                None,
+                None,
+                reply.queue_ms,
+                reply.request_ms,
+                reply.priority,
+            )
         provider = self.resolve_provider(cfg.systemone_provider_id)
         if inspect.isawaitable(provider):
             provider = await provider

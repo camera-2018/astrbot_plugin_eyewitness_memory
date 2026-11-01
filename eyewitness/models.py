@@ -15,6 +15,7 @@ class Settings(BaseModel):
     provider_id: str = ""
     json_mode: bool = False
     embedding_provider_id: str = ""
+    systemone_decision_provider_id: str = ""
     systemone_provider_id: str = ""
     systemone_model: str = ""
     systemone_api_path: str = "/typesafe/v1/systemone"
