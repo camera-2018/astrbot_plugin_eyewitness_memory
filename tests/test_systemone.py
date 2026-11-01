@@ -378,9 +378,11 @@ async def test_relevance_only_uses_one_call_and_respects_final_grounding(store, 
         assert set(request["questions"]) == {"relevance"}
         return parse_reply(response(request), request)
 
-    final = answers(mid, source) if accepted else [
-        {"decisions": [{"id": mid, "action": "reject", "reason": "原文不支持"}]}
-    ]
+    final = (
+        answers(mid, source)
+        if accepted
+        else [{"decisions": [{"id": mid, "action": "reject", "reason": "原文不支持"}]}]
+    )
     model = Model(final)
     result = await Engine(store, model, systemone=decide).recall(SCOPE, "绘画比赛", "alice")
     assert bool(result["injection"]) == accepted
@@ -406,7 +408,15 @@ async def test_relevance_only_keeps_completed_scores_when_other_candidate_times_
 
     result = {}
     ranked = await Engine(store, Model([]), systemone=decide).prioritize(
-        cfg, candidates, pool, contexts, "绘画比赛", "bob", [], None, result,
+        cfg,
+        candidates,
+        pool,
+        contexts,
+        "绘画比赛",
+        "bob",
+        [],
+        None,
+        result,
         deadline=asyncio.get_running_loop().time() + 2,
     )
     assert [m["subject_id"] for m in ranked] == ["bob", "alice"]

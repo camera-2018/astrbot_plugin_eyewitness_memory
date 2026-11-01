@@ -238,6 +238,13 @@ flowchart TD
 
 [MIT 许可证](LICENSE) · [第三方组件声明](THIRD_PARTY_NOTICES.md)
 
+### 开发检查
+
+提交前运行 `bash scripts/check_backend.sh`，使用锁定依赖依次执行 Ruff lint、格式检查和 pytest。
+GitHub CI 的 Python 3.11、3.12 后端任务使用同一入口；格式检查失败时不会继续运行测试。
+需要修正格式时先运行 `uv run --locked ruff format .`，再运行完整检查。
+前端构建、Playwright 和 AstrBot SDK 集成检查由 CI 的独立任务验证。
+
 ### FastBrain 召回与检索规划（v0.1.31）
 
 启用 `recall_gate_enabled` 后，一次 System One 请求执行三个独立分类：

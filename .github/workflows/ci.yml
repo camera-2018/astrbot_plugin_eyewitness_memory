@@ -13,10 +13,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
-      - run: uv sync --locked
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run pytest -q
+      - name: Backend checks (lint, format, tests)
+        run: bash scripts/check_backend.sh
   frontend:
     runs-on: ubuntu-latest
     steps:
